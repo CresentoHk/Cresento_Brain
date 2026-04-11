@@ -403,7 +403,24 @@ Fix: use **four** backslashes in the source (`"\\\\n"`) to produce the literal `
 
 Prefer `scripts/*.mjs` files for anything non-trivial.
 
-### 5. e5 query/passage prefix split produces ~0.97 not 1.0 for exact matches
+### 5. Recall context must NOT list prior tool names — it teaches mimicry without re-derivation
+
+> [!danger] Observed in real use on 2026-04-11
+> The first version of the recall injection included a `"Tools used: plan_analysis, query_player_insights, ..."` line under each recalled episode. When a coach re-asked a semantically similar question, the model copied the tool sequence from the recall block — **but skipped the argument-derivation steps the original run had done.** In the reported incident, the model called `query_player_insights` and `query_metric_summary` with `player_id: "Yonathan Bensadon"` (the player's **name**, not their Firestore ID) because the recall summary didn't show the `get_team_roster → find ID` step that preceded those calls the first time.
+>
+> Worse, when the model tried to recover from the failed tool calls, qwen3.6-plus **fell out of native function calling** and started emitting text-format tool calls (`<tool_call><function=get_team_roster>...</function></tool_call>`), which the server has no parser for. The stream closed on the text as the "final answer" and the user saw broken output.
+
+Fixes applied in route.ts:
+- **Remove the "Tools used" line entirely** from the recall context. Prior tool names are informational noise that encourages copy-paste without re-derivation.
+- **Shorten the prior answer snippet** from 500 → 300 chars and rename the header to "Past conclusion" so the model treats it as breadcrumb context, not an authoritative answer to paraphrase.
+- **Reduce `k` from 5 → 3** — fewer prior episodes in context means less pressure on the system-prompt length budget that pushes qwen into text-mode tool calls.
+- **Rewrite the usage instruction** from "You MAY reuse the tool approach" to "Use this ONLY to understand what the coach cares about — do not copy numbers, player IDs, or tool arguments from these snippets. Re-derive every fact via fresh tool calls."
+- **Add a text-mode detector** in the final-response branch of the tool loop that logs a warning whenever `<tool_call>` or `<function=` appears in the streamed content, so we can tell if this recurs.
+
+> [!info] Why qwen falls out of native function calling
+> The trigger is long or noisy system prompts combined with any assistant/context text that looks like a tool call. The model briefly "forgets" whether it's supposed to use native OpenAI-shape function calling or Qwen's older text format, and emits the wrong one. Keeping the recall context terse and tool-name-free is the main defense.
+
+### 6. e5 query/passage prefix split produces ~0.97 not 1.0 for exact matches
 
 The embedding model `intfloat/multilingual-e5-large-instruct` uses **different prefixes** for indexed passages (`passage: `) vs retrieval queries (`query: `). This produces *complementary* vectors, not identical ones. The smoke test's top-similarity score against the exact write query is ~0.9720, not 1.0000.
 

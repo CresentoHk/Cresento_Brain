@@ -135,6 +135,8 @@ See: [[StatsEngine Cross-Platform]]
 - **Session checkpoints are server-only.** `agentSessions/{sessionId}` writes go through `firebase-admin`, not the client SDK. Client just generates a stable `sessionId` and passes it in the POST body.
 - **`sanitizeForCheckpoint()` must be called** before writing any `messages[]` array to `agentSessions`. Vision-mode tool results contain base64 blobs that blow through Firestore's 1 MB per-doc cap.
 - **Rotate the embedding model at your peril.** Switching `EMBEDDING_MODEL` in `config.ts` invalidates every existing episode embedding. All prior recall breaks until the corpus is re-embedded.
+- **Recall context must NOT list prior tool names.** Listing the tools used in past episodes teaches the model to mimic the sequence without re-deriving arguments — seen in production on 2026-04-11 when qwen3.6-plus copied a tool sequence and passed a player NAME as `player_id` because the recall summary hid the preceding ID-lookup step. Keep the recall context to `{coach, date, userQuery, short conclusion}` only. Full story in [[Agent Memory System#5. Recall context must NOT list prior tool names — it teaches mimicry without re-derivation]].
+- **Watch the `<tool_call>` detector in logs.** Route.ts now logs `[Agent] Text-mode tool call detected` whenever qwen falls out of native OpenAI function calling and emits `<tool_call>` or `<function=` XML as text. If you see this in production, the recall context or system prompt is likely pushing the model past its native-function-call threshold — trim the context, don't add parsers for the text format.
 
 ---
 
