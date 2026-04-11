@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Cresento.md",
+                "file": "Vision System (Veo Pipeline).md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Cresento"
+              "title": "Vision System (Veo Pipeline)"
             }
           }
         ]
@@ -186,6 +186,9 @@
   },
   "active": "c7d16ab613637f63",
   "lastOpenFiles": [
+    "Firebase Backend.md",
+    "00 - Index.md",
+    "Cresento.md",
     "Reference Repos.md",
     "Reference Repos.md.tmp.7536.1775871001595",
     "Hardware Overview.md",
@@ -196,7 +199,6 @@
     "Session State Machine.md",
     "BLE Protocol.md",
     "BLE Protocol.md.tmp.7536.1775870828254",
-    "Firebase Backend.md",
     "Firebase Backend.md.tmp.7536.1775870794351",
     "Experimental Implementation.md",
     "AI Coach (text_ai_coach).md",
@@ -212,8 +214,6 @@
     "Cresento React Native App.md.tmp.7536.1775870526135",
     "02 - Architecture Overview.md",
     "01 - Critical Preservation Rules.md",
-    "01 - Critical Preservation Rules.md.tmp.7536.1775870454787",
-    "00 - Index.md",
-    "Cresento.md"
+    "01 - Critical Preservation Rules.md.tmp.7536.1775870454787"
   ]
 }
