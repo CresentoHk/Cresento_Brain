@@ -98,18 +98,21 @@ See: [[Cresento Website#Sessions calendar]]
 
 See: [[StatsEngine Cross-Platform]]
 
-> [!danger] Known bug: `segmentedFatigueScore` scale is mislabeled
-> There are TWO implementations of segmentedFatigueScore in the codebase (Cloud Function at `functions/src/index.ts:828-866` and client-side at `lib/utils.ts:249-526`). Both produce scores where **higher = LESS fatigued** (the ratio end/peak is closer to 1). But the Agent Mode tool output label at `lib/agent/tools.ts:869` and `:946` says `"0-10 (higher = more fatigued)"` — the OPPOSITE direction.
+> [!info] Partially fixed 2026-04-11 — Agent Mode reads are flipped, stored data is not
+> There are TWO implementations of segmentedFatigueScore in the codebase (Cloud Function at `functions/src/analytics-utils.ts:252` and client-side at `lib/utils.ts:249`). Both produce scores where **higher = LESS fatigued** (the ratio end/peak is closer to 1). Every coach-facing label says the OPPOSITE.
 >
-> Until it's fixed, Agent Mode's metric-docs entry (`lib/agent/metric-docs.ts`) tells the model to verify any scalar fatigue claim via `analyze_with_code` on raw speed data before citing it.
+> **Current state after commit `e17c443` (Option A):**
+> - ✅ Agent Mode tools flip the direction at read time via `flipSegmentedFatigue(raw) = 10 - raw` in `lib/agent/tools.ts`. Five read sites covered: SUMMARY_STAT_MAP, execQueryGameMetrics, execQuerySessionMetrics, execGetSessionTimeseries, fatigue_comparison chart case.
+> - ✅ Every scalar the model sees in Agent Mode is now in the label direction (higher = more fatigued).
+> - ✅ `metric-docs.ts` describes the label direction unambiguously.
+> - ❌ Stored Firestore data is still in the raw (inverted) direction.
+> - ❌ Non-Agent-Mode website UI (sessions calendar, dashboard, game analytics page) still reads the raw score — a coach reading the calendar sees the OLD direction.
+> - ❌ Neither formula has been rewritten; both still output the raw direction.
+> - ❌ Inside the `analyze_with_code` sandbox, `<alias>.precomputed.segmentedFatigue.score` is still the RAW value. Code that reads it must apply `10 - score` manually. The sandboxCatalog entry now carries a warning.
 >
-> The fix is either:
-> 1. Invert the label (if the formulas are right), OR
-> 2. Change the Cloud Function to output `10 - score` so high = fatigued matches the label (if the formula is wrong)
+> **Canonical fix (Option B)** is deferred and tracked as a TODO in [[Agent Memory System#Option B — canonical segmentedFatigue migration (TODO)]]. It implements Phase B of [[SessionMetrics Migration Plan]]: Cloud Function writes `segmentedFatigueScore0to10` (already flipped) to the new `sessionMetrics` collection, backfill runs for historical docs, Agent Mode + website UI read the new field directly. This is the right long-term fix.
 >
-> Don't ship fatigue changes without fixing this — coaches are reading contradictory numbers today.
->
-> See [[Firestore Collection Audit 2026-04-11#Label/formula bug discovered in segmentedFatigueScore]] for the full investigation.
+> See [[Firestore Collection Audit 2026-04-11#Label/formula bug discovered in segmentedFatigueScore]] for the full original investigation.
 
 ---
 

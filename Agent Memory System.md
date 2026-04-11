@@ -486,7 +486,20 @@ canonical Firestore collection per-call.
 - ✅ Return a `sandboxCatalog` with field paths matching `loadSessionForSandbox()` exactly
 - ✅ Return an `analyzeHint` with an example `analyze_with_code` call pre-populated
 
-### 7. Recall context must NOT list prior tool names — it teaches mimicry without re-derivation
+### 8. segmentedFatigueScore must be flipped at the Agent Mode read boundary
+
+> [!danger] Label vs formula mismatch, partially fixed 2026-04-11
+> The raw `segmentedFatigue.score` stored in Firestore is in the LEGACY direction (higher = LESS fatigued — the formula measures "how well did the player hold their peak"). Every coach-facing label says the OPPOSITE. This has been producing inverted answers in Agent Mode since Cora launched.
+>
+> Option A (surgical read-time flip) shipped in commit `e17c443`. Every Agent Mode read path of `segmentedFatigue.score` now flows through `flipSegmentedFatigue(raw) = 10 - raw` in `lib/agent/tools.ts`. Five sites covered. The raw stored data is untouched; the flip happens purely at the Agent Mode boundary.
+>
+> **Rule for all future Agent Mode reads of this field:** go through `flipSegmentedFatigue()`. Never return the raw stored value to the model — it will produce inverted conclusions. A grep for `segmentedFatigue\?\.score` in any `execXxx` function that doesn't have a nearby `flipSegmentedFatigue` call is a bug.
+>
+> **Inside the analyze_with_code sandbox**, `<alias>.precomputed.segmentedFatigue.score` is STILL the raw value. Code that reads it must apply `10 - score` manually. The sandboxCatalog entry in `execGetSessionTimeseries` carries a ⚠️ warning to this effect, and the system prompt explicitly tells the model to do the flip in its code.
+>
+> **Canonical fix (Option B)** is deferred as a TODO — see the section below. Option B writes a new `segmentedFatigueScore0to10` field in the flipped direction to the `sessionMetrics` collection via the Cloud Function, runs a backfill for historical docs, and points every reader at the new field. When Option B ships, this gotcha gets removed and the `flipSegmentedFatigue` helper becomes dead code.
+
+### 9. Recall context must NOT list prior tool names — it teaches mimicry without re-derivation
 
 > [!danger] Observed in real use on 2026-04-11
 > The first version of the recall injection included a `"Tools used: plan_analysis, query_player_insights, ..."` line under each recalled episode. When a coach re-asked a semantically similar question, the model copied the tool sequence from the recall block — **but skipped the argument-derivation steps the original run had done.** In the reported incident, the model called `query_player_insights` and `query_metric_summary` with `player_id: "Yonathan Bensadon"` (the player's **name**, not their Firestore ID) because the recall summary didn't show the `get_team_roster → find ID` step that preceded those calls the first time.
@@ -556,9 +569,107 @@ Verdict line at the end:
 
 ---
 
+## TODO: Option B — canonical segmentedFatigue migration
+
+> [!todo] Deferred canonical fix for the segmentedFatigueScore direction bug
+> **Status:** Option A (surgical read-time flip) shipped in commit `e17c443` on 2026-04-11. Agent Mode now returns the correct direction. Non-Agent-Mode surfaces (website calendar, dashboard) still see the raw (inverted) score. Option B below is the canonical fix that will unify every surface on one field in the correct direction.
+
+**The plan**, from [[SessionMetrics Migration Plan#Phase B — Update the Cloud Function to write cross-session metrics to `sessionMetrics`]]:
+
+### Step 1 — Cloud Function writes flipped score to sessionMetrics
+
+File: `Cresento Website/Cresento.net/functions/src/index.ts`
+
+In `processAndSaveAnalytics()` after `calculateSegmentedFatigue()` runs, also write to `sessionMetrics/{sessionId}`:
+
+```typescript
+const flippedSegScore =
+  segmentedFatigue && typeof segmentedFatigue.score === "number"
+    ? Math.max(0, Math.min(10, 10 - segmentedFatigue.score))
+    : null
+const flippedConfidence = segmentedFatigue?.confidence ?? null
+
+await db.collection("sessionMetrics").doc(sessionId).set(
+  {
+    segmentedFatigueScore0to10: flippedSegScore,
+    segmentedFatigueConfidence: flippedConfidence,
+    metricsLastSource: "cloud_function",
+    metricsComputedAt: admin.firestore.FieldValue.serverTimestamp(),
+  },
+  { merge: true }
+)
+```
+
+Use `set({merge: true})` so the phone-written fields from Phase A (already shipped in RN app's `SessionMetricsBuilder.ts`) are preserved.
+
+### Step 2 — Backfill historical sessions
+
+File: `Cresento Website/Cresento.net/scripts/backfill-sessionMetrics.mjs`
+
+Walk every existing `sensorData/{id}` doc, extract `precomputedAnalytics.segmentedFatigue.score` and `.confidence`, flip, write to `sessionMetrics/{id}`. Idempotent — running twice produces the same result.
+
+**Run procedure:**
+1. `node scripts/backfill-sessionMetrics.mjs --dry-run` — prints count of docs touched and a sample of flipped values
+2. Review the dry-run output. If a flipped value looks wrong for a known session, abort.
+3. `node scripts/backfill-sessionMetrics.mjs --yes` — applies in batches of 400 with a 500 ms delay between batches
+
+### Step 3 — Agent Mode reads prefer new field, fall back to flip
+
+File: `Cresento Website/Cresento.net/lib/agent/tools.ts`
+
+At each of the 5 current `flipSegmentedFatigue()` call sites, change the read to:
+
+```typescript
+// Prefer the canonical flipped field. Fall back to flipping the raw
+// stored score on the fly for sessions that haven't been backfilled yet.
+const sm = await getSessionMetrics(sessionId) // new helper in firestore.ts
+const flippedScore =
+  sm?.segmentedFatigueScore0to10 ??
+  flipSegmentedFatigue(analytics?.segmentedFatigue?.score)
+```
+
+Keep `flipSegmentedFatigue()` alive during the rollout. Delete it once every session has been backfilled and every new session is being written via Step 1.
+
+### Step 4 — Website UI migration
+
+Files: `lib/firestore.ts`, `components/dashboard/sessions-calendar.tsx`, `components/analytics/*`, `app/games/[id]/analytics/page.tsx`, `lib/utils.ts`
+
+Add a `getSessionMetrics(sessionId)` helper in `firestore.ts` that reads from `sessionMetrics/{sessionId}` with a fallback to flipping the raw score. Migrate the calendar and dashboard components one at a time — this is Phase D in the full migration plan and touches the ~70 KB `sessions-calendar.tsx` critical file, so do it under a feature flag and verify each surface before removing the fallback.
+
+### Step 5 — Remove `flipSegmentedFatigue` and this gotcha
+
+Once Steps 1–4 are done and monitored for a week:
+- Delete `flipSegmentedFatigue()` from `lib/agent/tools.ts`
+- Delete the ⚠️ warning from the sandboxCatalog entry in `execGetSessionTimeseries`
+- Update [[01 - Critical Preservation Rules#🧮 StatsEngine consistency across platforms]] to mark the label bug as fixed
+- Remove gotcha #8 from this note (the read-time flip rule becomes dead)
+
+### Risks to watch
+
+- **Cloud Function deploys restart live infrastructure.** Deploy during low-traffic hours.
+- **The backfill script writes to production Firestore.** Always dry-run first. Check one known session's flipped value matches expectations before applying to all ~thousands.
+- **`sessions-calendar.tsx` is a critical 70 KB file.** Migration under a feature flag. If a coach complains about a fatigue number, the flag is the rollback.
+- **The client-side `lib/utils.ts` formula** still outputs the raw direction. It's currently only called from a few non-Agent paths. Decide whether to rewrite the formula to output the flipped direction directly, or keep flipping in the caller — the latter is safer but duplicates the flip logic.
+
+### Blast radius
+
+| Surface | Current (Option A) | After Option B |
+|---|---|---|
+| Agent Mode text output | ✅ Flipped | ✅ Reads `segmentedFatigueScore0to10` directly |
+| Agent Mode charts | ✅ Flipped | ✅ Reads new field |
+| Agent Mode sandbox (analyze_with_code) | ⚠️ Raw in sandbox, warning in catalog | ✅ New field also in catalog, raw still available |
+| Website sessions calendar | ❌ Raw (wrong) | ✅ Reads new field |
+| Website dashboard | ❌ Raw (wrong) | ✅ Reads new field |
+| Website analytics pages | ❌ Raw (wrong) | ✅ Reads new field |
+| iOS app | N/A (no segmented impl) | N/A |
+| RN app | N/A (writes phone-only fields, leaves segmented null for Cloud Function) | ✅ Will auto-read whatever field is written |
+
+---
+
 ## Related
 
 - [[Cresento Website]]
 - [[Firebase Backend]] — the paging/wrapper rules this follows
 - [[01 - Critical Preservation Rules]]
 - [[Firestore Collection Audit 2026-04-11]] — current collection inventory
+- [[SessionMetrics Migration Plan]] — Phase B above is Phase B there
