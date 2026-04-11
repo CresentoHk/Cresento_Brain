@@ -53,6 +53,7 @@ These are crosscutting — touching them affects every platform.
 
 - [[Firebase Backend]] — auth, Firestore collections, paging rules
 - [[Firestore Collection Audit 2026-04-11]] — current inventory + cleanup plan
+- [[Agent Memory System]] — Cora's long-term memory (episodes, recall, future playbooks)
 - [[BLE Protocol]] — UUIDs, command bytes, packet format (FROZEN)
 - [[Session State Machine]] — idle → logging → flushing
 - [[StatsEngine Cross-Platform]] — three implementations that must match

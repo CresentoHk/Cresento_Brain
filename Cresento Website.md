@@ -75,7 +75,10 @@ Cresento Website/Cresento.net/
 │   ├── seed-openrouter-config.mjs    (seeds the Agent Mode key pool)
 │   ├── verify-openrouter-config.mjs  (pings each key, prints status)
 │   ├── backup-firestore.mjs          (full DB backup to local JSON)
-│   └── restore-firestore.mjs         (inverse, requires --yes)
+│   ├── restore-firestore.mjs         (inverse, requires --yes)
+│   ├── delete-ghost-collections.mjs  (hardcoded allowlist of deletable ghost cols)
+│   ├── verify-and-migrate-sessions.mjs (legacy sessions orphan checker)
+│   └── ttl-cleanup.mjs               (batch-delete past-expiration docs, teamInvites + emailCodes)
 └── app/                        (Next.js App Router pages)
 ```
 

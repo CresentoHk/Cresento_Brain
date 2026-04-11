@@ -64,14 +64,24 @@ Counts captured 2026-04-11 via `node scripts/backup-firestore.mjs --dry-run --sk
 > [!info] Why `agentUsage` is empty
 > As of this audit, no Agent Mode V3 request has successfully landed. Either (a) the deploy hasn't been exercised, or (b) the auth guard is silently rejecting every call. Worth monitoring — if no `agentUsage/{uid}` docs appear after real usage, that's a separate bug to investigate.
 
-### Stale accumulators (need TTL, not deletion)
+### Stale accumulators — ✅ cleaned 2026-04-11
 
-| Collection | Docs | Problem |
-|---|---:|---|
-| `teamInvites` | **128** | Invites never expire — should auto-delete after ~7 days |
-| `emailCodes` | **116** | Email verification codes — should auto-delete after ~24h |
+| Collection | Docs at start | Deleted | TTL field |
+|---|---:|---:|---|
+| `teamInvites` | 128 | **128** (all past `expiresAt`) | `expiresAt` (Timestamp, already set by `lib/invites.ts:createTeamInvite`) |
+| `emailCodes` | 116 | **115** (1 missing the `expires` field, left alone) | `expires` (Timestamp, set by iOS signup flow) |
 
-Fix: add a Firestore TTL policy in the Firebase Console. Zero code changes.
+Total: **243 docs deleted**. Ran via `scripts/ttl-cleanup.mjs --yes`. The one `emailCodes` doc without an `expires` field was left in place for manual review — probably a malformed legacy doc from a different iOS version.
+
+#### Long-term fix — enable Firestore TTL policies (user action required)
+
+Both collections already have proper `Timestamp` fields for expiration. Adding a TTL policy in the Firebase Console makes Firestore auto-delete expired docs within 24–72 hours, forever:
+
+1. Open https://console.firebase.google.com/project/cresento-8b603/firestore/ttl
+2. **Create policy** → Collection Group: `teamInvites` → Timestamp field: `expiresAt`
+3. **Create policy** → Collection Group: `emailCodes` → Timestamp field: `expires`
+
+Once both are active, `scripts/ttl-cleanup.mjs` is no longer needed for these two collections. Keep the script around as a template for any new accumulator collection that shows up in the future.
 
 ### Ghost collections — DELETE (confirmed dead)
 
@@ -172,16 +182,35 @@ Tracked for fix as part of the `sessionMetrics` migration (see [[SessionMetrics 
 
 | Phase | Risk | Est. impact | Status |
 |---|---|---|---|
-| **Phase 0** | None | — | **Done.** Backups captured (targeted + full metadata) |
-| **Phase 1** | Low | 18 ghost docs deleted, 7 collections removed | Pending user sign-off |
-| **TTL setup** | None | Auto-cleans ~200 accumulating stale docs | Pending |
-| **Phase 2** | Medium | **Biggest win** — drops ~50% of sensorData read size by killing `precomputedAnalytics.acceleration` + client-side reconstruct | Pending |
-| **Phase 3** | Low | Kill `sessions` collection (2 merge leftovers), remove ~500 LOC of dual-write | Pending |
-| **Phase 4** | Low | Consolidate analytics storage to one location | Pending |
-| **Phase 5** | Medium | Downsample speed from 20 Hz to 10 Hz on new sessions | Pending |
-| Phase 6 (next sprint) | High | Move raw time-series entirely to Firebase Storage as binary | Future |
+| **Phase 0** | None | — | ✅ **Done 2026-04-11.** Backups captured, all ghost content saved to `firestore-backup/2026-04-11T03-42-52-129/` |
+| **Phase 1a** | Low | Delete 2 legacy `sessions` docs | ✅ **Done 2026-04-11.** `EP6cGdPQQziuQC0QGBYw` confirmed to have trimConfig already mirrored in `sensorData`; `dmZF5sZ1EwWfxwOxI9HS` confirmed orphan (no matching sensorData, zero incoming references). Both deleted via inline batch. |
+| **Phase 1b** | Low | 19 docs across 7 ghost collections | ✅ **Done 2026-04-11.** Deleted via `scripts/delete-ghost-collections.mjs --yes`: `IdealMetrics` (1), `PadClaims` (1), `pads` (1), `Team` (1), `TrainingPrograms` (3), `userProgress` (9), `exercises` (3). |
+| **Phase 1c** | Low | 243 expired docs across 2 accumulator collections | ✅ **Done 2026-04-11.** Deleted via `scripts/ttl-cleanup.mjs --yes`: `teamInvites` (128, all past `expiresAt`), `emailCodes` (115, past `expires`; 1 missing field left alone). |
+| **TTL policies (Console)** | None | Prevents future accumulation | ⏳ User action — Firebase Console → Firestore → TTL. See "Long-term fix" section above. |
+| **Sessions migration** | — | Flat queryable metrics + phone-first compute | See [[SessionMetrics Migration Plan]] — **design answers locked 2026-04-11**, ready to start Phase A. |
 
-Expected outcome after Phases 1-5: session reads drop from ~5-10 MB to ~1-2 MB. Calendar, coach console, and agent queries 3-5× faster.
+### Post-cleanup state (verified 2026-04-11)
+
+**264 total docs deleted today** across 10 collection cleanups:
+
+- 8 ghost collections fully emptied: `sessions` (2), `IdealMetrics` (1), `PadClaims` (1), `pads` (1), `Team` (1), `TrainingPrograms` (3), `userProgress` (9), `exercises` (3). Total: 21 docs.
+- 2 stale accumulators drained: `teamInvites` (128), `emailCodes` (115). Total: 243 docs.
+
+All 8 ghost collections confirmed empty via direct Admin SDK query. `teamInvites` and `emailCodes` still exist as collection refs and continue to receive new writes from the website signup and iOS flows — only the expired docs were removed.
+
+Firebase Console listings may still SHOW empty collection names for a short period — Firestore garbage-collects empty collection refs lazily on the next write to a neighboring collection. They're functionally gone.
+
+### The orphan session investigation (kept for reference)
+
+When running the verify script, `sessions/dmZF5sZ1EwWfxwOxI9HS` failed the safety check because no matching `sensorData/dmZF5sZ1EwWfxwOxI9HS` existed. Deeper investigation showed:
+
+- The orphan was a failed merge attempt from 2025-12-30.
+- Both source sessions (`d8q5uxHYnrwR7iFkM6NV`, `EiZyvxcWbXATAYE4ZVPn`) exist in `sensorData` with their data intact (9165 + 2718 speed samples = 135.24 min of data).
+- Both source sessions have `mergedInto: "EP6cGdPQQziuQC0QGBYw"` — pointing at the LIVE retry, NOT at the orphan.
+- Zero docs anywhere referenced the orphan ID (`mergedInto == orphan` query returned 0, `mergedFrom array-contains orphan` returned 0, `sessionGroups.sessionIds array-contains orphan` returned 0).
+- The orphan was a dead metadata record with no data and no incoming references — safe to delete with no migration needed.
+
+**Lesson for the Cloud Function merge logic:** when a merge fails after writing the `sessions` metadata but before writing the `sensorData` doc, the metadata becomes an orphan. A Cloud Function `onDocumentCreated` trigger for `sessions` that checks for the matching `sensorData` doc within N minutes and deletes the metadata if it's still missing would prevent this from happening again. Once `sessions` is deprecated entirely (Phase 3 of the old plan, absorbed into the [[SessionMetrics Migration Plan]]), this is moot.
 
 ---
 

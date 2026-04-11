@@ -399,12 +399,50 @@ From the RN research:
 
 ---
 
-## Open questions for the human
+## Design answers (locked 2026-04-11)
 
-1. **Do we want to fix the fatigue direction now?** The plan above assumes yes (rename to `sprintSpeedFatigueScore1to10` with explicit "higher = more fatigued"). Alternative: keep the raw scores as-is and only rename, leaving the existing direction. Less disruptive but keeps the bug.
-2. **Does the phone also write `phaseStats[]` (early/mid/late splits from StatsEngine)?** Currently discarded. Useful for fatigue analysis but adds ~500 bytes.
-3. **Should `sessionMetrics` be a top-level collection, or nested under `orgs/{orgId}/sessionMetrics`?** Top-level is simpler to query across orgs (admin/support views). Nested gives better security rules.
-4. **Do we want a subcollection `sessionMetrics/{id}/phaseStats/{phase}` for the phase breakdowns**, or flatten them into the main doc (`phaseEarlyDistanceM`, `phaseMidDistanceM`, etc.)?
+All 4 open questions resolved by the architect:
+
+1. **Fatigue names and direction — FIX NOW.** Rename to three unambiguous fields with distinct scales, and flip the sprint-speed metric so **higher = more fatigued** across all three (matching the Agent Mode tool label):
+   - `sprintSpeedFatigueScore1to10` — was `fatigueScore`. 1 = sprints sustained, 10 = total sprint collapse. Stored as `11 - rawBucketScore` so the direction flips at write time.
+   - `activityLoadIndex0to100` — was `performance.fatigueIndex`. 0 = standing still, 100 = max activity. Not renamed from the direction perspective (it's really a workload proxy, not fatigue), just given a clearer name.
+   - `segmentedFatigueScore0to10` — was `segmentedFatigue.score`. **Flipped**: new formula = `10 - rawScore`. 0 = no decline, 10 = full collapse (matches the label everywhere).
+2. **phaseStats — YES, include them.** StatsEngine already computes early/mid/late splits and throws them away. Include all three phases as flat top-level fields on `sessionMetrics`.
+3. **Top-level collection — YES.** `sessionMetrics/{sessionId}`, not nested under `orgs/{orgId}`. Simpler cross-org admin queries, single place for the agent mode to scan.
+4. **Phase stats flat — YES.** No subcollections. Each phase's metrics become `phase{Early|Mid|Late}DistanceM`, `phase{Early|Mid|Late}MaxSpeedKmh`, etc. on the main doc. Keeps queries simple.
+
+The schema in the previous section already uses these names. Code below applies the direction flip at write time so every client that reads `sessionMetrics` sees consistent "higher = more fatigued" semantics without needing to know about the underlying formula direction.
+
+## Additional phaseStats fields (from answer #2)
+
+Add these to the `SessionMetricsDoc` schema. Values come from `StatsEngine.ts:computeStats().phases`, which currently produces an array `[early, mid, late]` of `PhaseStats` — we just flatten it:
+
+```ts
+// Phase breakdowns — EARLY = first third, MID = middle third, LATE = last third
+// Every distance is in meters, every speed in km/h, every count absolute
+phaseEarlyDistanceM: number
+phaseEarlySprintDistanceM: number
+phaseEarlyMaxSpeedKmh: number
+phaseEarlyAvgSpeedKmh: number
+phaseEarlySprintEvents: number
+phaseEarlyDurationSec: number
+
+phaseMidDistanceM: number
+phaseMidSprintDistanceM: number
+phaseMidMaxSpeedKmh: number
+phaseMidAvgSpeedKmh: number
+phaseMidSprintEvents: number
+phaseMidDurationSec: number
+
+phaseLateDistanceM: number
+phaseLateSprintDistanceM: number
+phaseLateMaxSpeedKmh: number
+phaseLateAvgSpeedKmh: number
+phaseLateSprintEvents: number
+phaseLateDurationSec: number
+```
+
+18 extra fields × ~10 bytes each = ~200 bytes. Total doc size stays around ~1.7 KB. Enables queries like "show me players whose late-phase sprint events dropped > 50% below their early-phase count" — a direct in-DB fatigue query that doesn't need the raw time-series at all.
 
 ---
 
