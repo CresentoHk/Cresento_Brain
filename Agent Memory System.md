@@ -17,6 +17,73 @@ aliases:
 > [!success] Phase 1 is live and verified
 > Smoke-tested end to end on 2026-04-11 — episodes are being written, sessions checkpointed, conversations persisted, and recall via vector search returns the expected matches. Top-similarity of 0.9720 against the exact write query (correct behaviour for e5 query/passage prefix split). See `scripts/memory-smoke-test.mjs` to re-run.
 
+> [!danger] ⚠️ HANDOFF WARNING FOR OTHER LLMs / AGENTS
+> This system was shipped on 2026-04-11 in commit `74361a0` on branch `agent-demo`. Before editing ANY file in the manifest below, you MUST read [[01 - Critical Preservation Rules#🧠 Agent Memory System (Cora)]] and the [[#Gotchas discovered during Phase 1 bring-up]] section of this note. The design has 9 load-bearing rules that look like they could be "simplified" but will break silently if you change them. If in doubt, DO NOT edit — ask first.
+>
+> **Most common mistakes that will break this system:**
+> 1. Adding `where()` filters before `findNearest()` in `store.ts` (forces composite vector index that can't be deployed from UI/CLI)
+> 2. Removing `export const maxDuration = 300` from `app/api/agent/route.ts` (re-introduces the "fresh instance" timeout bug)
+> 3. Calling Together AI for LLM tasks, or OpenRouter for embeddings (provider split is intentional)
+> 4. Skipping the `passage: ` / `query: ` prefix in `embed.ts` (e5 retrieval quality collapses)
+> 5. Spreading objects with optional fields into Firestore writes (`undefined` values throw)
+> 6. Bypassing the `AgentMemory` interface by calling `embed.ts` or `FirestoreAgentMemory` directly
+> 7. Changing the embedding model in `config.ts` without a migration plan (invalidates entire stored corpus)
+
+## 📂 Touched files manifest
+
+Full list of files that were created or modified in Phase 1. **Do not rewrite these without reading the rules first.** Line counts reflect the shipped commit `74361a0`.
+
+### New files (`Cresento Website/Cresento.net/`)
+
+| File | Lines | Purpose |
+|---|---|---|
+| `lib/agent/memory/config.ts` | 46 | Embedding model + thresholds |
+| `lib/agent/memory/interface.ts` | 181 | `AgentMemory`, `Episode`, `Fact`, `Playbook`, `Conversation` types |
+| `lib/agent/memory/embed.ts` | 126 | Together AI client (only place that calls Together) |
+| `lib/agent/memory/store.ts` | 220 | `FirestoreAgentMemory` (recall + recordEpisode) |
+| `lib/agent/memory/conversations.ts` | 117 | UI-facing transcript upsert |
+| `lib/agent/memory/sessions.ts` | 275 | Mid-turn checkpoint/resume (fixes "fresh instance" bug) |
+| `lib/agent/memory/index.ts` | 48 | `getMemory()` singleton + re-exports |
+| `lib/agent/memory/README.md` | 428 | Integration guide + smoke test instructions |
+| `scripts/memory-smoke-test.mjs` | 222 | End-to-end verification (safe to re-run, never prints secrets) |
+
+### Modified files
+
+| File | What changed |
+|---|---|
+| `app/api/agent/route.ts` | +203 lines. **9 integration edits.** `maxDuration = 300` + loadSession at top + recall injection + sessionId + fresh-or-resume messages builder + checkpointSession after each tool iteration + recordEpisode/upsertConversation/markSessionComplete in finally block. Capture `finalAssistantText` and `toolCallDigests` inside the stream. |
+| `components/coach/agent-mode.tsx` | +26 lines. Added `sessionIdRef` (stable per conversation via `crypto.randomUUID()`), passed into `streamAgentResponse`, included in POST body. |
+| `lib/agent/auth-guard.ts` | +8 lines. `AuthedUser` now returns `displayName` (from profile → decoded token → email → null). Memory records this as `coachName` for recall attribution. |
+| `lib/agent/usage-log.ts` | +10 / -4. **Pre-existing bug fix unrelated to memory itself.** Was spreading `...event` into Firestore doc, hitting `Cannot use "undefined" as a Firestore value` on every successful run because `error?` was undefined. Now filters undefined fields. |
+| `firestore.indexes.json` | **Not committed yet** — lives in working tree with user's parallel sessionMetrics indexes. Vector index is already deployed to the live Firestore DB via `firebase deploy --only firestore:indexes`. Will ship with user's next sessionMetrics commit. |
+
+### New Firestore collections
+
+| Path | Purpose | Writer | Reader |
+|---|---|---|---|
+| `agentMemory/{orgId}/episodes/{autoId}` | Q&A turns with 1024-dim embedding for recall | Server (admin SDK) | Server (admin SDK via `findNearest`) |
+| `agentSessions/{sessionId}` | Mid-turn tool-loop state for resumption | Server | Server |
+| `agentConversations/{sessionId}` | UI-facing transcript for recent-conversations sidebar | Server | Future: client (needs Firestore rule) |
+
+### New env vars
+
+| Name | Scope | Notes |
+|---|---|---|
+| `TOGETHER_API_KEY` | `.env.local` + Vercel | Only for embeddings. All LLM calls still go through `OPENROUTER_API_KEY`. |
+
+### Firestore indexes
+
+Single-field vector index on `episodes.embedding`:
+- Dimension: 1024
+- Distance: COSINE
+- Deployed via `firebase deploy --only firestore:indexes`
+- Defined in `firestore.indexes.json` (uncommitted, see above)
+
+### Commit references
+
+- **Website:** `CresentoHk/Cresento.net@74361a0` on branch `agent-demo` — `feat(agent): phase 1 long-term memory + session checkpoint resume`
+- **Vault:** `CresentoHk/Cresento_Brain@15ce11d` on branch `main` — `docs(agent): phase 1 memory system live — smoke-tested + gotchas captured`
+
 # 🧠 Agent Memory System (Cora)
 
 Long-term memory for the website's Agent Mode (`Cora`). Persists conversation turns as **episodes** in Firestore, semantically recalls similar past questions on each new request, and injects the most relevant ones into the system prompt so Cora doesn't re-derive analysis she's already done.
