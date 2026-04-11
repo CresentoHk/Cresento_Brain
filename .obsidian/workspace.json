@@ -182,8 +182,10 @@
   },
   "active": "c7d16ab613637f63",
   "lastOpenFiles": [
-    "SessionMetrics Consistency Plan.md",
     "Agent Memory System.md",
+    "01 - Critical Preservation Rules.md.tmp.8260.1775889588148",
+    "Agent Memory System.md.tmp.8260.1775889338299",
+    "SessionMetrics Consistency Plan.md",
     "SessionMetrics Migration Plan.md",
     "Firestore Collection Audit 2026-04-11.md",
     "DataRecoveryIOS (ShinPad iOS).md",
@@ -211,9 +213,7 @@
     "Nordic BLE Firmware (nRF52811).md.tmp.7536.1775870603356",
     "Cresento Website.md",
     "Cresento React Native App.md",
-    "Cresento React Native App.md.tmp.7536.1775870526135",
     "02 - Architecture Overview.md",
-    "01 - Critical Preservation Rules.md",
-    "01 - Critical Preservation Rules.md.tmp.7536.1775870454787"
+    "01 - Critical Preservation Rules.md"
   ]
 }
