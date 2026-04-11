@@ -121,6 +121,23 @@ See: [[StatsEngine Cross-Platform]]
 
 ---
 
+## 🧠 Agent Memory System (Cora)
+
+> [!danger] Cora's memory system has its own load-bearing rules
+> See [[Agent Memory System]] for the full architecture. The rules below are the ones that cause silent data loss or broken recall if violated.
+
+- **OpenRouter for LLM, Together AI for embeddings.** The provider split is intentional. Don't mix.
+- **Always go through `getMemory()`** from `lib/agent/memory/index.ts`. Never call `embed.ts` or `FirestoreAgentMemory` directly from outside the module.
+- **No `where()` filters before `findNearest()`** in `store.ts`. That forces a composite vector index that can't be created via the Firebase Console or Firebase CLI without gcloud. Filter in JS post-query and overfetch.
+- **The `passage: ` / `query: ` prefix split is mandatory** for the e5 embedding model. `embedPassage()` at write time, `embedQuery()` at read time. Skipping or swapping breaks recall quality.
+- **Firestore rejects `undefined` field values.** Never spread an object with optional fields directly into a `set()` / `add()` call. Build payloads field-by-field.
+- **`export const maxDuration = 300` at the top of `app/api/agent/route.ts` is load-bearing.** The tool-use loop regularly runs 2–4 minutes; the Vercel default (10s Hobby / 60s Pro) truncates them. Removing this re-introduces the "fresh instance" bug.
+- **Session checkpoints are server-only.** `agentSessions/{sessionId}` writes go through `firebase-admin`, not the client SDK. Client just generates a stable `sessionId` and passes it in the POST body.
+- **`sanitizeForCheckpoint()` must be called** before writing any `messages[]` array to `agentSessions`. Vision-mode tool results contain base64 blobs that blow through Firestore's 1 MB per-doc cap.
+- **Rotate the embedding model at your peril.** Switching `EMBEDDING_MODEL` in `config.ts` invalidates every existing episode embedding. All prior recall breaks until the corpus is re-embedded.
+
+---
+
 ## ✅ Safe-change checklist
 
 Before merging anything in firmware, BLE-adjacent code, Firestore wrappers, or calendar view:
