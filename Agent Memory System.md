@@ -7,7 +7,7 @@ tags:
   - agent
   - ml
 created: 2026-04-11
-status: phase-1-scaffolded
+status: phase-1-applied
 location: "Cresento Website/Cresento.net/lib/agent/memory/"
 ---
 
@@ -249,11 +249,12 @@ The shared thing is the *long-term memory layer*. In-flight state and literal tr
 | `lib/agent/memory/sessions.ts`             | ✅ Written                                 |
 | `lib/agent/memory/index.ts`                | ✅ Written                                 |
 | `lib/agent/memory/README.md` (integration) | ✅ Written                                 |
-| `app/api/agent/route.ts` edits (9 edits)   | ⏳ Diff ready, not applied                 |
-| Client sends stable `sessionId`            | ⏳ Pending — client change needed          |
+| `lib/agent/auth-guard.ts` exposes displayName | ✅ Applied                               |
+| `app/api/agent/route.ts` edits (9 edits)   | ✅ Applied                                 |
+| `export const maxDuration = 300` in route  | ✅ Applied                                 |
+| `components/coach/agent-mode.tsx` sessionId | ✅ Applied                                |
 | `TOGETHER_API_KEY` in `.env.local`         | ⏳ Manual add required                     |
 | `TOGETHER_API_KEY` on Vercel               | ⏳ Manual add required                     |
-| `export const maxDuration = 300` in route  | ⏳ Part of route.ts diff                   |
 | Firestore vector index                     | ⏳ Auto-prompted on first run              |
 | Fact extraction (Phase 2)                  | ❌ Not built                               |
 | Playbooks (Phase 3)                        | ❌ Not built                               |
