@@ -406,6 +406,42 @@ Fix: use **four** backslashes in the source (`"\\\\n"`) to produce the literal `
 
 Prefer `scripts/*.mjs` files for anything non-trivial.
 
+### 7. Chart renderings must emphasize the claim, not the raw data
+
+> [!danger] Observed 2026-04-11
+> Cora answered a "when should I sub Yonathan?" question and rendered three `speed_vs_fatigue` charts (one per game). Every chart:
+> - Had identical title `"Speed Trend & Stamina Decay — Yonathan Bensadon"` — the coach couldn't tell which game was which
+> - Showed raw 20 Hz speed as a noisy line with a linear-regression trend slope of ~0.14–0.25 km/h per hour — visually indistinguishable from flat on a 0–25 km/h axis
+> - The `distance_per_minute` charts colored bars green/gray based on above/below session average, but the legend was disabled so the color split looked arbitrary
+
+**Architectural rules for chart renderings:**
+
+1. **Per-session charts must include the session date in the title.** `loadSessionForChart()` (in `lib/agent/tools.ts`) returns a `dateLabel` field derived from `startTime → uploadedAt → first speed sample`. Every per-session chart renderer must accept an optional `sessionLabel` param and append `— ${sessionLabel}` to the title. Without it, multi-game answers show a wall of identical titles.
+
+2. **Charts must emphasize the conclusion the model is drawing**, not the raw data:
+   - Replace raw noisy time series with a **rolling average** as the primary signal (3-min rolling average in `renderSpeedWithRegression`). Raw data becomes a dim background reference (opacity 0.18).
+   - Draw **reference lines** for the specific scalar values the model is reasoning about. For fatigue: a horizontal line at the baseline-window average and another at the end-window average. The visible gap between them IS the fatigue claim.
+   - Subtitle the chart title with the delta: `"Decay: 9.1 → 7.4 km/h (-18.7%)"`. The viewer should be able to tell whether the player is fatigued without reading the model's prose.
+
+3. **Any color differentiation needs a visible explanation.** If a chart colors some bars one way and others another way, the legend must contain swatches labeled with what the colors mean. Use **legend-only proxy datasets** (data array of nulls, colored swatches) in Chart.js — they populate the legend without adding visible bars. Example in `renderDistancePerMinute`: "Above session avg (N m)" + "Below session avg".
+
+4. **Mix bar + line datasets** using Chart.js's `type: "line"` dataset inside a `type: "bar"` chart config. Works on QuickChart without extra plugins. Use this to draw horizontal reference lines (averages, thresholds, targets) on top of bar charts without needing the annotation plugin.
+
+5. **Do NOT use Chart.js's `chartjs-plugin-annotation`.** QuickChart supports it but config is verbose and error-prone. Mixed datasets are simpler and render identically.
+
+6. **Color palette for fatigue/performance charts:**
+   - Foreground signal (rolling average, above-average bars): `#10b981` (emerald-500)
+   - Background / below-average reference: `#4b5563` (slate-600) or rgba(8, 146, 118, 0.18)
+   - Reference line for baseline: `#60a5fa` (blue-400, dashed)
+   - Reference line for end window / session average: `#f59e0b` (amber-500, dashed)
+   - These are used in `renderSpeedWithRegression` and `renderDistancePerMinute` — keep other chart renderers visually consistent.
+
+**Phase C implementation**, commit `2a58f32`:
+- `loadSessionForChart` now returns `{data, name, dateLabel}`
+- All 8 per-session cases in `execRenderChart` pass the date into renderers and append it to `chartTitle`
+- `renderSpeedWithRegression` rewritten to show rolling avg + baseline/end reference lines + delta subtitle
+- `renderDistancePerMinute` now has a legend explaining the color split and a mixed bar+line dataset with the session average
+
 ### 6. Tool results must NEVER flow through the chat context — schema-first architecture
 
 > [!danger] Cora's "stuck mid-analysis" bug, observed 2026-04-11
