@@ -28,6 +28,9 @@ aliases:
 > 5. Spreading objects with optional fields into Firestore writes (`undefined` values throw)
 > 6. Bypassing the `AgentMemory` interface by calling `embed.ts` or `FirestoreAgentMemory` directly
 > 7. Changing the embedding model in `config.ts` without a migration plan (invalidates entire stored corpus)
+> 8. **Making a heavy-data tool return raw payloads to the model.** All tools that load > ~5 KB of data must return a schema only (`aggregate`, `analytics`, `sandboxCatalog`, `analyzeHint`). The raw data stays in the sandbox. See gotcha #6 in this note.
+> 9. **Converting `resume_needed` back into a user-facing error.** The auto-resume flow (server checkpoint → client re-POST → server resume from checkpoint) is how Cora recovers from empty iterations. Don't turn it into a spinner + error page.
+> 10. **Removing the server heartbeat or the client's `heartbeat` no-op case.** Intermediate proxies kill idle SSE streams, and the heartbeat is what keeps them alive during silent model phases.
 
 ## 📂 Touched files manifest
 
@@ -403,7 +406,51 @@ Fix: use **four** backslashes in the source (`"\\\\n"`) to produce the literal `
 
 Prefer `scripts/*.mjs` files for anything non-trivial.
 
-### 5. Recall context must NOT list prior tool names — it teaches mimicry without re-derivation
+### 6. Tool results must NEVER flow through the chat context — schema-first architecture
+
+> [!danger] Cora's "stuck mid-analysis" bug, observed 2026-04-11
+> Coach asked a 3-game fatigue-inflection question. Cora called `get_session_timeseries` three times successfully, then went silent for minutes during the reasoning phase before `analyze_with_code`. The SSE stream emitted no visible events. User saw an infinite spinner. Root cause: each `get_session_timeseries` call was returning 30–60 KB of data (downsampled speed points + full precomputedAnalytics blob + aggregate stats) into the `messages[]` array. Three calls × 60 KB = 180 KB of tool-result content in context on top of the system prompt and reasoning. qwen3.6-plus couldn't hold it together and reasoned slowly / got stuck.
+
+**Architectural rule, to be applied to every heavy-data tool:**
+
+```
+Tools that load large payloads must NOT return that data to the model.
+Instead they return a SCHEMA:
+  - Top-line scalar aggregates (small — totalDistance, maxSpeed, ...)
+  - Key precomputed scalars (score, ratio, slope, r²)
+  - A sandbox catalog: field paths + types describing what the data
+    looks like INSIDE the analyze_with_code VM
+  - An analyzeHint with an example tool call pre-populated
+
+The actual raw data NEVER enters the `messages[]` context. It lives
+only inside the sandbox, loaded fresh by analyze_with_code from the
+canonical Firestore collection per-call.
+```
+
+**Why this works without a persistent workspace:**
+- `analyze_with_code` in `lib/agent/tools.ts` already calls `loadSessionForSandbox(sessionId, orgId, ...)` itself on every invocation
+- The model doesn't need to "transfer" data from `get_session_timeseries` to `analyze_with_code` — both tools reach the same Firestore path
+- The schema tool tells the model *what exists* and *what field paths to use* in the sandbox; the compute tool loads the data at the moment it's needed
+- Zero cross-call state, zero new infrastructure
+
+**Phase B implementation, commit `69b4670`:**
+- `get_session_timeseries` (lib/agent/tools.ts) now returns `{metadata, aggregate, analytics, sandboxCatalog, analyzeHint}` — ~1.5 KB instead of 30–60 KB
+- `AGENT_TOOLS` schema in tools.ts rewritten: the `description` explicitly tells the model "this does NOT return raw data — it returns a schema; use analyze_with_code to compute"
+- System prompt in `lib/agent/config.ts` has a new "Step A: Discovery / Step B: Computation" section teaching the two-step pattern. Recipes updated.
+- Dropped `fields` and `downsample_to` params (they're meaningless now that no raw data is returned). Added optional `alias` param so the sandbox catalog shows the field paths the model will actually type into its code.
+
+**Not yet converted (deliberately, for scope):**
+- `query_game_metrics`, `query_session_metrics`, `query_metric_summary`, `query_player_insights`, `query_team_overview` — these return smaller category-based payloads and the benefit is smaller. Migrate incrementally if their payloads become a problem. When you do, use the same pattern: `{aggregate, analytics, sandboxCatalog, analyzeHint}`.
+
+**Rules for future heavy-data tools:**
+- ❌ Do not return arrays with > ~50 items to the model
+- ❌ Do not return "raw" anything — by the time it reaches the model, it's already schema
+- ❌ Do not add `downsample_to` or `fields` params as escape hatches — if the model needs the data, the sandbox needs it
+- ✅ Return scalar aggregates (totals, maxes, ratios, scores) — the model needs these to reason
+- ✅ Return a `sandboxCatalog` with field paths matching `loadSessionForSandbox()` exactly
+- ✅ Return an `analyzeHint` with an example `analyze_with_code` call pre-populated
+
+### 7. Recall context must NOT list prior tool names — it teaches mimicry without re-derivation
 
 > [!danger] Observed in real use on 2026-04-11
 > The first version of the recall injection included a `"Tools used: plan_analysis, query_player_insights, ..."` line under each recalled episode. When a coach re-asked a semantically similar question, the model copied the tool sequence from the recall block — **but skipped the argument-derivation steps the original run had done.** In the reported incident, the model called `query_player_insights` and `query_metric_summary` with `player_id: "Yonathan Bensadon"` (the player's **name**, not their Firestore ID) because the recall summary didn't show the `get_team_roster → find ID` step that preceded those calls the first time.
