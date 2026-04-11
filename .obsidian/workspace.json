@@ -4,17 +4,21 @@
     "type": "split",
     "children": [
       {
-        "id": "de2b0662fc66eefe",
+        "id": "5eea67162850c762",
         "type": "tabs",
         "children": [
           {
-            "id": "c7d16ab613637f63",
+            "id": "ef5dd8e78d3e236b",
             "type": "leaf",
             "state": {
-              "type": "graph",
-              "state": {},
-              "icon": "lucide-git-fork",
-              "title": "Graph view"
+              "type": "markdown",
+              "state": {
+                "file": "01 - Critical Preservation Rules.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "01 - Critical Preservation Rules"
             }
           }
         ]
@@ -180,8 +184,12 @@
       "bases:Create new base": false
     }
   },
-  "active": "c7d16ab613637f63",
+  "active": "ef5dd8e78d3e236b",
   "lastOpenFiles": [
+    "Agent Memory System.md.tmp.8260.1775905282567",
+    "Agent Memory System.md.tmp.8260.1775905228587",
+    "00 - Index.md",
+    "Cresento.md",
     "Agent Memory System.md",
     "01 - Critical Preservation Rules.md.tmp.8260.1775889588148",
     "Agent Memory System.md.tmp.8260.1775889338299",
@@ -191,8 +199,6 @@
     "DataRecoveryIOS (ShinPad iOS).md",
     "Vision System (Veo Pipeline).md",
     "Firebase Backend.md",
-    "00 - Index.md",
-    "Cresento.md",
     "Reference Repos.md",
     "Reference Repos.md.tmp.7536.1775871001595",
     "Hardware Overview.md",
@@ -210,7 +216,6 @@
     "ESP32-S3 SmallBoard Firmware.md",
     "ESP32-S3 SmallBoard Firmware.md.tmp.7536.1775870655135",
     "Nordic BLE Firmware (nRF52811).md",
-    "Nordic BLE Firmware (nRF52811).md.tmp.7536.1775870603356",
     "Cresento Website.md",
     "Cresento React Native App.md",
     "02 - Architecture Overview.md",
