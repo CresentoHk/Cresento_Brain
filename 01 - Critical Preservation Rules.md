@@ -98,6 +98,19 @@ See: [[Cresento Website#Sessions calendar]]
 
 See: [[StatsEngine Cross-Platform]]
 
+> [!danger] Known bug: `segmentedFatigueScore` scale is mislabeled
+> There are TWO implementations of segmentedFatigueScore in the codebase (Cloud Function at `functions/src/index.ts:828-866` and client-side at `lib/utils.ts:249-526`). Both produce scores where **higher = LESS fatigued** (the ratio end/peak is closer to 1). But the Agent Mode tool output label at `lib/agent/tools.ts:869` and `:946` says `"0-10 (higher = more fatigued)"` — the OPPOSITE direction.
+>
+> Until it's fixed, Agent Mode's metric-docs entry (`lib/agent/metric-docs.ts`) tells the model to verify any scalar fatigue claim via `analyze_with_code` on raw speed data before citing it.
+>
+> The fix is either:
+> 1. Invert the label (if the formulas are right), OR
+> 2. Change the Cloud Function to output `10 - score` so high = fatigued matches the label (if the formula is wrong)
+>
+> Don't ship fatigue changes without fixing this — coaches are reading contradictory numbers today.
+>
+> See [[Firestore Collection Audit 2026-04-11#Label/formula bug discovered in segmentedFatigueScore]] for the full investigation.
+
 ---
 
 ## 🗃️ Repository quirks — leave them alone
