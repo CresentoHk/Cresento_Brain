@@ -55,7 +55,7 @@ These are crosscutting — touching them affects every platform.
 - [[Firebase Backend]] — auth, Firestore collections, paging rules
 - [[Firestore Collection Audit 2026-04-11]] — current inventory + cleanup plan
 - [[Security Audit 2026-04-14]] — website vulnerabilities, prioritized (3 critical, unfixed)
-- [[Tech Debt Audit 2026-04-14]] — website tech debt, prioritized with phased remediation plan
+- [[Tech Debt Audit 2026-04-14]] — website tech debt (Phase 1 shipped; Phase 2 in progress)
 - [[SessionMetrics Migration Plan]] — flat queryable session metrics schema (Phases B–E done)
 - [[SessionMetrics Consistency Plan]] — file-by-file edit plan for RN + website sync
 - [[SessionMetrics RN Migration (Phases A+F)]] — what the RN app needs for Phase F reads

@@ -6,7 +6,7 @@ tags:
   - frontend
   - tech-debt
 created: 2026-04-14
-status: open
+status: phase-1-complete
 ---
 
 # 🧹 Cresento Website Tech Debt Audit — 2026-04-14
@@ -14,6 +14,9 @@ status: open
 Tech debt inventory for the Next.js website at `Cresento Website/Cresento.net/`. Scored on Impact (1–5), Risk (1–5), and Effort (1–5, inverted). Priority = (Impact + Risk) × (6 − Effort).
 
 Related: [[Cresento Website]] · [[Security Audit 2026-04-14]] · [[Firestore Collection Audit 2026-04-11]] · [[01 - Critical Preservation Rules]]
+
+> [!success] Phase 1 shipped — 2026-04-15
+> Branch `tech-debt-phase-1` off `agent-demo`. 5 atomic commits, `npm run build` green, 61 transitive packages dropped. See [[#Phase 1 — Shipped 2026-04-15]] below.
 
 > [!warning] Scope boundary
 > Do **NOT** touch anything in `lib/agent/memory/*`, `app/api/agent/route.ts` token/duration limits, session state machine logic, or anything listed in [[01 - Critical Preservation Rules]]. Phase-1 remediation is only the "safe" items below.
@@ -110,12 +113,14 @@ Related: [[Cresento Website]] · [[Security Audit 2026-04-14]] · [[Firestore Co
 
 ## Phased Remediation Plan
 
-### Phase 1 — Quick wins (1 week, low risk)
+### Phase 1 — Quick wins (1 week, low risk) ✅ SHIPPED 2026-04-15
 
 1. Delete one lock file; pin CI to `npm` **or** `pnpm`.
 2. Replace `latest` pins with caret ranges (especially `firebase`, `recharts`).
 3. Audit which chart lib is actually rendered; remove the other. Consolidate on one.
 4. Strip `console.log` from `lib/firestore.ts`; route through a tiny `lib/log.ts` gated on `NODE_ENV`.
+
+See **[[#Phase 1 — Shipped 2026-04-15]]** below for details.
 
 ### Phase 2 — Safe refactors (2–3 weeks, alongside features)
 
@@ -142,6 +147,72 @@ Covered in [[01 - Critical Preservation Rules]], reiterated here because the tem
 - Session state machine (`idle → logging → flushing`).
 - BLE UUIDs / characteristics / command bytes ([[BLE Protocol]]).
 - Website calendar session loading — historically sensitive.
+
+---
+
+## Phase 1 — Shipped 2026-04-15
+
+Branch: `tech-debt-phase-1` off `agent-demo`. 5 atomic commits. `npm run build` verified green before merge.
+
+### Commits
+
+| # | SHA       | Change                                                                                   |
+| - | --------- | ---------------------------------------------------------------------------------------- |
+| 1 | `103f526` | Removed `pnpm-lock.yaml`; standardized on npm                                            |
+| 2 | `6572ffd` | Pinned 15 `latest` deps to caret ranges matching installed versions                      |
+| 3 | `f0dcd46` | Migrated 3 recharts components → chart.js; removed recharts dep                          |
+| 4 | `853290c` | Created `lib/log.ts`; routed 263 `console.*` calls in `lib/firestore.ts` through it     |
+| 5 | `4f16e51` | Regenerated `package-lock.json` (61 transitive packages dropped)                         |
+
+### Audit correction caught during execution
+
+> [!info] Chart library direction was backwards in original audit
+> Original audit said "drop chart.js, keep recharts." Actual usage: **chart.js in 28 files, recharts in 3 files**. Flipped direction mid-execution — kept chart.js, migrated the 3 recharts files. Document this for future audits: count usage before recommending which to drop.
+
+### New load-bearing file
+
+**`lib/log.ts`** — scoped logger.
+
+- `log.debug` / `log.info` — NO-OP in production (gated on `process.env.NODE_ENV`).
+- `log.warn` / `log.error` — always fire. Real signals.
+- `log.scope("firestore")` — returns a logger that prefixes every line with `[firestore]`. Filterable in Vercel / browser console.
+- Convention: one scope per module. Do not reintroduce bare `console.*` calls in `lib/firestore.ts` — see comment at top of that file.
+
+### Files migrated from recharts → chart.js
+
+Pattern used (matching existing `components/analytics/chartjs-*.tsx`):
+
+```tsx
+import { Line } from "react-chartjs-2"
+import "@/lib/chart-config"                // registers chart.js components
+import { ClientOnly } from "@/components/client-only"
+// ...
+<ClientOnly fallback={<div className="h-full w-full" />}>
+  <Line data={chartData} options={chartOptions} />
+</ClientOnly>
+```
+
+1. `components/dashboard/activity-chart.tsx` — Bar chart (1 chart).
+2. `components/sessions/performance-charts.tsx` — Line×3, Bar (horizontal), Scatter (5 charts).
+3. `components/players/player-detail-modal.tsx` — Pie → Doughnut (1 chart). Also removed ~12 dead recharts imports (RadarChart, PolarGrid, etc.) that were never rendered.
+
+### Phase 1 impact
+
+- **Dependencies:** No `latest` pins; single lockfile (npm); recharts removed along with 60 transitive packages.
+- **Production logs:** 191 debug `console.log` calls in `lib/firestore.ts` no longer ship to prod.
+- **Build:** Green, 16 static pages generated, no new warnings.
+- **Untouched:** `lib/agent/memory/*`, `app/api/agent/route.ts`, session state machine, sessions-calendar, the 28 existing chart.js analytics components, all mega-components.
+
+---
+
+## Phase 2 — In Progress 2026-04-15
+
+Plan (see audit body above for context):
+
+1. Split `lib/firestore.ts` into `lib/firestore/{reads,writes,cache,tracking,types}.ts` via barrel file — no caller changes.
+2. Reroute the 4 direct `firebase/firestore` imports through the wrapper.
+3. Add a bounded-page variant of `getSensorDataByOrg` (line 2077 fan-out).
+4. Write `ARCHITECTURE.md` covering data flow + Session/SessionGroup/Game migration.
 
 ---
 
