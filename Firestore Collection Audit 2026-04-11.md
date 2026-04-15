@@ -60,6 +60,9 @@ Counts captured 2026-04-11 via `node scripts/backup-firestore.mjs --dry-run --sk
 | `scheduledActivities` | 2 | website coach page | website coach page |
 | `config` | 1 | manual via seed scripts | server-side only (Agent Mode key pool) |
 | `agentUsage` | 0 | `lib/agent/usage-log.ts` (new in V2) | server-side only |
+| `sessionMetrics` | 1,425 | backfill script + Cloud Function (2026-04-12) | agent tools (partial), website (Phase D pending) |
+| `agentSessions` | varies | `lib/agent/memory/sessions.ts` | agent mode checkpoint/resume |
+| `episodes` | varies | `lib/agent/memory/store.ts` | agent mode long-term memory |
 
 > [!info] Why `agentUsage` is empty
 > As of this audit, no Agent Mode V3 request has successfully landed. Either (a) the deploy hasn't been exercised, or (b) the auth guard is silently rejecting every call. Worth monitoring — if no `agentUsage/{uid}` docs appear after real usage, that's a separate bug to investigate.

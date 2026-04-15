@@ -32,6 +32,7 @@ Cresento is a sports analytics platform for soccer coaches and athletes. It span
 | [[Cresento Website]]                               | Next.js 14 App Router, TS   | Coach dashboard    | Active |
 | [[Nordic BLE Firmware (nRF52811)]]                 | C/Arduino, S112 SoftDevice  | ShinPad firmware   | Active |
 | [[ESP32-S3 SmallBoard Firmware]]                   | C/Arduino, ESP32 BLE + WiFi | Newer board design | Active |
+| [[ESP32-C6 XIAO Firmware (Rishab PCB)]]            | C/Arduino, ESP32-C6 BLE+WiFi6 | XIAO dev board   | Active |
 | [[DataRecoveryIOS (ShinPad iOS)]]                  | Swift, SwiftUI, Firebase    | Native iOS app     | Active |
 | [[Vision System (Veo Pipeline)]]                   | Python, OpenCV, YOLO        | Match-video CV     | Active |
 
@@ -53,8 +54,11 @@ These are crosscutting — touching them affects every platform.
 
 - [[Firebase Backend]] — auth, Firestore collections, paging rules
 - [[Firestore Collection Audit 2026-04-11]] — current inventory + cleanup plan
-- [[SessionMetrics Migration Plan]] — flat queryable session metrics schema (in progress)
+- [[Security Audit 2026-04-14]] — website vulnerabilities, prioritized (3 critical, unfixed)
+- [[Tech Debt Audit 2026-04-14]] — website tech debt, prioritized with phased remediation plan
+- [[SessionMetrics Migration Plan]] — flat queryable session metrics schema (Phases B–E done)
 - [[SessionMetrics Consistency Plan]] — file-by-file edit plan for RN + website sync
+- [[SessionMetrics RN Migration (Phases A+F)]] — what the RN app needs for Phase F reads
 - [[Agent Memory System]] — Cora's long-term memory (episodes, recall, future playbooks)
 - [[BLE Protocol]] — UUIDs, command bytes, packet format (FROZEN)
 - [[Session State Machine]] — idle → logging → flushing
@@ -68,11 +72,17 @@ These are crosscutting — touching them affects every platform.
 
 ---
 
+## 🧪 Proposals / Exploration
+
+- [[Proposal - ESP-NOW Mesh Gateway]] — pad-to-pad ESP-NOW mesh so out-of-range pads forward data through neighbors to a gateway pad. Status: exploring, needs Phase 0 range test.
+
+---
+
 ## 🏷️ Tags
 
 Use these consistently when adding new notes:
 
-- `#project/rn-app` `#project/website` `#project/nordic` `#project/esp` `#project/ios` `#project/vision` `#project/ai-coach`
+- `#project/rn-app` `#project/website` `#project/nordic` `#project/esp` `#project/esp-c6` `#project/ios` `#project/vision` `#project/ai-coach`
 - `#shared` — cross-platform concerns
 - `#critical` — do-not-break code
 - `#firmware` `#frontend` `#backend` `#ml` `#cv` `#hardware`

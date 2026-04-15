@@ -9,18 +9,20 @@ created: 2026-04-11
 
 # 🔧 Hardware Overview
 
-Cresento has **two custom ShinPad boards in active development**, both wearing on the player's leg, both speaking the same BLE protocol so the apps can ignore which chip is inside.
+Cresento has **three ShinPad firmware tracks in active development**, all speaking the same BLE protocol so the apps can ignore which chip is inside.
 
-| Property      | Nordic board                       | ESP32 board                            |
-| ------------- | ---------------------------------- | -------------------------------------- |
-| MCU           | Nordic nRF52811                    | Espressif ESP32-S3                     |
-| BLE stack     | S112 SoftDevice v7.3.0 (peripheral)| Arduino BLEDevice                      |
-| Wi-Fi         | ❌                                  | ✅ (TCP streaming to RPi)              |
-| Toolchain     | Arduino IDE + Nordic SDK           | Arduino IDE + ESP32 core               |
-| Programmer    | J-Link / SWD                       | USB                                    |
-| Firmware note | [[Nordic BLE Firmware (nRF52811)]] | [[ESP32-S3 SmallBoard Firmware]]       |
+| Property      | Nordic board                       | ESP32-S3 board                         | XIAO ESP32-C6 board                    |
+| ------------- | ---------------------------------- | -------------------------------------- | --------------------------------------- |
+| MCU           | Nordic nRF52811                    | Espressif ESP32-S3                     | Espressif ESP32-C6 (RISC-V)            |
+| BLE stack     | S112 SoftDevice v7.3.0 (peripheral)| Arduino BLEDevice                      | Arduino BLEDevice                       |
+| Wi-Fi         | ---                                | Wi-Fi 4 (TCP streaming to RPi)         | Wi-Fi 6 (802.11ax)                     |
+| Extra radios  | ---                                | ---                                    | 802.15.4 (Thread/Zigbee/Matter)         |
+| Toolchain     | Arduino IDE + Nordic SDK           | Arduino IDE + ESP32 core               | Arduino IDE + ESP32 core                |
+| Programmer    | J-Link / SWD                       | USB                                    | USB-C                                   |
+| Form factor   | Custom PCB                         | Custom PCB                             | COTS module (21x17.8 mm)               |
+| Firmware note | [[Nordic BLE Firmware (nRF52811)]] | [[ESP32-S3 SmallBoard Firmware]]       | [[ESP32-C6 XIAO Firmware (Rishab PCB)]] |
 
-Both boards share the same peripherals — the IMU, flash, and fuel gauge are common.
+The Nordic and ESP32-S3 boards share the same peripherals (IMU, flash, fuel gauge). The XIAO ESP32-C6 is a bare module — external breakouts must be wired for sensor data.
 
 ---
 
@@ -93,6 +95,7 @@ The Altium project is the source of truth for the ESP board layout. Manufacturin
 
 - [[Nordic BLE Firmware (nRF52811)]]
 - [[ESP32-S3 SmallBoard Firmware]]
+- [[ESP32-C6 XIAO Firmware (Rishab PCB)]]
 - [[BLE Protocol]]
 - [[Session State Machine]]
 - [[Data Pipeline]]

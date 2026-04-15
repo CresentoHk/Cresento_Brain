@@ -31,6 +31,8 @@ aliases:
 > 8. **Making a heavy-data tool return raw payloads to the model.** All tools that load > ~5 KB of data must return a schema only (`aggregate`, `analytics`, `sandboxCatalog`, `analyzeHint`). The raw data stays in the sandbox. See gotcha #6 in this note.
 > 9. **Converting `resume_needed` back into a user-facing error.** The auto-resume flow (server checkpoint → client re-POST → server resume from checkpoint) is how Cora recovers from empty iterations. Don't turn it into a spinner + error page.
 > 10. **Removing the server heartbeat or the client's `heartbeat` no-op case.** Intermediate proxies kill idle SSE streams, and the heartbeat is what keeps them alive during silent model phases.
+> 11. **Letting a non-string, non-array `content` field reach `messages[]` on a tool-result turn.** OpenRouter's Alibaba provider rejects the whole request with a 400 — `Invalid type for 'messages.[N].content': expected one of a string or array of objects, but got an object instead` — and the retry loop re-sends the same malformed messages forever. Every `role: "tool"` message MUST have `content: string` (JSON-stringify before assigning). Every assistant message with tool calls MUST have `content: "" | null | string | contentArray`. See gotcha #10.
+> 12. **Overwriting `thinkingRoundsRef.current[last]` when a new tool call starts** (in `components/coach/agent-mode.tsx`). The `onToolCall` handler must APPEND a fresh empty round, not reset `currentThinkingRef.current` in place. Otherwise the coach only sees the final round's reasoning and every earlier round's thinking text vanishes. See gotcha #11.
 
 ## 📂 Touched files manifest
 
@@ -486,18 +488,22 @@ canonical Firestore collection per-call.
 - ✅ Return a `sandboxCatalog` with field paths matching `loadSessionForSandbox()` exactly
 - ✅ Return an `analyzeHint` with an example `analyze_with_code` call pre-populated
 
-### 8. segmentedFatigueScore must be flipped at the Agent Mode read boundary
+### 8. segmentedFatigueScore — canonical field now in `sessionMetrics`
 
-> [!danger] Label vs formula mismatch, partially fixed 2026-04-11
-> The raw `segmentedFatigue.score` stored in Firestore is in the LEGACY direction (higher = LESS fatigued — the formula measures "how well did the player hold their peak"). Every coach-facing label says the OPPOSITE. This has been producing inverted answers in Agent Mode since Cora launched.
+> [!info] Option B steps 1–3 shipped 2026-04-12. Steps 4–5 remain.
+> The raw `segmentedFatigue.score` stored in Firestore is in the LEGACY direction (higher = LESS fatigued). The canonical field `sessionMetrics/{id}.segmentedFatigueScore0to10` stores the flipped value (higher = MORE fatigued, matching all coach-facing labels).
 >
-> Option A (surgical read-time flip) shipped in commit `e17c443`. Every Agent Mode read path of `segmentedFatigue.score` now flows through `flipSegmentedFatigue(raw) = 10 - raw` in `lib/agent/tools.ts`. Five sites covered. The raw stored data is untouched; the flip happens purely at the Agent Mode boundary.
+> **What shipped (Option B steps 1–3):**
+> - ✅ Cloud Function (`functions/src/index.ts`) writes `segmentedFatigueScore0to10` after `calculateSegmentedFatigue` runs
+> - ✅ Backfill script (`scripts/backfill-sessionMetrics.mjs`) already handles the flip — ready to run with `--yes`
+> - ✅ Agent tools read via `getCanonicalFatigueScore(sessionId, rawFallback)`: tries `sessionMetrics` first, falls back to `flipSegmentedFatigue()` for unbackfilled sessions
+> - ✅ `metric-docs.ts` updated to reference the canonical field
 >
-> **Rule for all future Agent Mode reads of this field:** go through `flipSegmentedFatigue()`. Never return the raw stored value to the model — it will produce inverted conclusions. A grep for `segmentedFatigue\?\.score` in any `execXxx` function that doesn't have a nearby `flipSegmentedFatigue` call is a bug.
+> **Rule for new Agent Mode reads:** use `getCanonicalFatigueScore()` (async). For bulk/sync paths (like SUMMARY_STAT_MAP), `flipSegmentedFatigue()` is still acceptable.
 >
-> **Inside the analyze_with_code sandbox**, `<alias>.precomputed.segmentedFatigue.score` is STILL the raw value. Code that reads it must apply `10 - score` manually. The sandboxCatalog entry in `execGetSessionTimeseries` carries a ⚠️ warning to this effect, and the system prompt explicitly tells the model to do the flip in its code.
+> **Inside the analyze_with_code sandbox**, `<alias>.precomputed.segmentedFatigue.score` is STILL the raw value. Code that reads it must apply `10 - score` manually.
 >
-> **Canonical fix (Option B)** is deferred as a TODO — see the section below. Option B writes a new `segmentedFatigueScore0to10` field in the flipped direction to the `sessionMetrics` collection via the Cloud Function, runs a backfill for historical docs, and points every reader at the new field. When Option B ships, this gotcha gets removed and the `flipSegmentedFatigue` helper becomes dead code.
+> **What remains (steps 4–5):** Website UI migration + removal of `flipSegmentedFatigue`. See the TODO section below.
 
 ### 9. Recall context must NOT list prior tool names — it teaches mimicry without re-derivation
 
@@ -515,6 +521,97 @@ Fixes applied in route.ts:
 
 > [!info] Why qwen falls out of native function calling
 > The trigger is long or noisy system prompts combined with any assistant/context text that looks like a tool call. The model briefly "forgets" whether it's supposed to use native OpenAI-shape function calling or Qwen's older text format, and emits the wrong one. Keeping the recall context terse and tool-name-free is the main defense.
+
+### 10. OpenRouter 400 — `messages[N].content` object rejected by Alibaba provider
+
+> [!danger] Observed 2026-04-11 during a 3-game "when should I sub Yonathan" run
+> Cora successfully ran `plan_analysis` → `browse_calendar` + `get_team_roster` → 3× `load_game_data` → 3× `get_session_timeseries` + `describe_metrics` → `analyze_with_code` → `render_chart` (×2 failed `speed_timeline`) → `browse_charts` → `render_chart` (×3 `speed_vs_fatigue`) → 2 more `analyze_with_code` rounds → and produced a full prose answer with a Markdown table and the recommendation "Sub at Minute 75–80". **38 tool calls total.** Then the stream died mid-render with:
+>
+> ```json
+> {"error":{"message":"Provider returned error","code":400,
+>   "metadata":{
+>     "raw":"{\"error\":{\"message\":\"Invalid type for 'messages.[19].content': expected one of a string or array of objects, but got an object instead.\",\"type\":\"invalid_request_error\",\"param\":\"'messages.[19].content'\",\"code\":\"invalid_type\"}}",
+>     "provider_name":"Alibaba"
+>   }
+> }}
+> ```
+>
+> Alibaba's OpenAI-compatible endpoint is strict: every `content` field must be `string | Array<{type:..., ...}> | null`. A raw JS object (e.g. `{aggregate:..., analytics:...}`) is rejected with a permanent 400. Worse, the existing auto-resume loop **re-sent the same malformed `messages[]` three more times** before giving up, burning tokens and delaying the error surface to the coach.
+
+**Root cause hypotheses — all need investigation:**
+
+1. **`executeTool()` return value shape.** Every tool handler in `lib/agent/tools.ts` must return `content: string` (JSON-stringified). Some branch — likely `execGetSessionTimeseries`, `execAnalyzeWithCode`, or a chart renderer error path — is returning an object literal instead of a JSON-stringified string. Grep `execXxx` functions for any `return { ... }` that isn't wrapped in `JSON.stringify()` before assignment to `content`.
+2. **`sanitizeForCheckpoint()` fall-through.** In `lib/agent/memory/sessions.ts`, the sanitizer handles `string`, `Array`, and `null` content explicitly but falls through to `"[unsupported content type stripped]"` for objects. If the sanitizer is skipped on a path — e.g. `appendToolResult()` writes directly to the in-memory `messages[]` before the next checkpoint round — an object slips through and the next OpenRouter call fails.
+3. **Chart image result merge.** `render_chart` returns a vision content array `[{type:"text",...}, {type:"image_url", image_url:{url:...}}]`. If on resume the server reconstructs `messages[]` from the checkpoint and merges the array with some server-side annotations, the result could become an object (`{type:"text", ...}` without the outer array). Check the resume path in `app/api/agent/route.ts` around `loadSession()` where messages are re-hydrated.
+4. **`analyze_with_code` result shape.** The sandbox returns `{result, logs, error?, elapsedMs}` — if this is passed directly to `content` anywhere instead of being `JSON.stringify()`'d, it'll be an object at index N. Verify `execAnalyzeWithCode` returns `content: JSON.stringify({...})` at every return site including error paths.
+
+**Defense rule going forward — enforce at a single chokepoint:**
+
+```typescript
+// In route.ts, before appending ANY message from a tool result to messages[]:
+function coerceToolContent(raw: unknown): string | ContentBlock[] {
+  if (typeof raw === "string") return raw
+  if (Array.isArray(raw)) return raw  // vision content blocks
+  if (raw === null || raw === undefined) return ""
+  // Defensive: never let an object reach OpenRouter as content
+  try { return JSON.stringify(raw) } catch { return String(raw) }
+}
+```
+
+Every `messages.push({role: "tool", tool_call_id, content: coerceToolContent(...)})` should flow through this helper. **Do not rely on each tool handler returning the right shape** — centralize the guard.
+
+**Log the offender.** Before `coerceToolContent` falls through to the object branch, `console.warn("[Agent] Tool result was object — coerced:", { toolName, keys: Object.keys(raw as object) })`. Next reproduction tells us which tool is the culprit.
+
+### 11. Thinking rounds clobber each other — only the final round is visible to the coach
+
+> [!danger] Observed 2026-04-11
+> Coach said: "im also unable to see all the thinking in between tools". Confirmed in code: in `components/coach/agent-mode.tsx` lines ~867–903 the streaming handlers work like this:
+>
+> - `onThinking(token)` — appends to `currentThinkingRef.current`, then at line 872–880 it either pushes a first round or **overwrites `rounds[last]`** with `currentThinkingRef.current`.
+> - `onToolCall(name, args)` — resets `currentThinkingRef.current = ""` at line 899, then does `thinkingRoundsRef.current = [...thinkingRoundsRef.current]` (just a shallow copy) at line 902. **It never pushes a new empty round.**
+>
+> Result: when the next `onThinking` token arrives after a tool call, `currentThinkingRef.current` starts from `""`, and the check `rounds[last] !== currentThinkingRef.current` is true, so the code falls into the `rounds[rounds.length - 1] = currentThinkingRef.current` branch — **overwriting the previous round's completed text with the new round's starting text.** Every tool boundary silently eats the previous round.
+>
+> User sees only the LAST reasoning round, which is often a short "synthesize the final answer" blurb. The in-between reasoning — the part that explains why Cora chose `analyze_with_code` over `query_metric_summary`, why she picked 3-minute rolling windows, why she excluded the first 5 minutes — is invisible.
+
+**Fix (pending):**
+
+In `onToolCall`, after detecting a tool boundary, explicitly push a new empty round:
+
+```typescript
+// onToolCall — finalize current thinking round, start a new one
+(name, args) => {
+  // If there's in-flight thinking text, leave it in place as a completed round
+  // and START A NEW ROUND so the next onThinking tokens append, not overwrite.
+  if (currentThinkingRef.current.trim().length > 0) {
+    thinkingRoundsRef.current = [...thinkingRoundsRef.current, ""]
+  }
+  currentThinkingRef.current = ""
+  // ... rest of the handler unchanged
+}
+```
+
+And in `onThinking`, the check at line 873 must be: *if the last round is the "active" empty-started round, append; otherwise push a new round*. Safer rewrite:
+
+```typescript
+(token) => {
+  currentThinkingRef.current += token
+  setStatusLabel("Reasoning...")
+  const rounds = [...thinkingRoundsRef.current]
+  if (rounds.length === 0) {
+    rounds.push(currentThinkingRef.current)
+  } else {
+    // The last round IS the currently-streaming round by contract
+    rounds[rounds.length - 1] = currentThinkingRef.current
+  }
+  thinkingRoundsRef.current = rounds
+  // ... setMessages unchanged
+}
+```
+
+The contract becomes: **`thinkingRoundsRef.current[last]` is always the currently-streaming round. `onToolCall` is the ONLY place that closes a round and opens a new one, by pushing `""` onto the array.**
+
+`ThinkingRounds` component at line 1265 already renders every round in the array, so once the ref contains all rounds they'll all display. No UI change needed — this is a pure state-management bug in the stream handlers.
 
 ### 6. e5 query/passage prefix split produces ~0.97 not 1.0 for exact matches
 
@@ -571,8 +668,8 @@ Verdict line at the end:
 
 ## TODO: Option B — canonical segmentedFatigue migration
 
-> [!todo] Deferred canonical fix for the segmentedFatigueScore direction bug
-> **Status:** Option A (surgical read-time flip) shipped in commit `e17c443` on 2026-04-11. Agent Mode now returns the correct direction. Non-Agent-Mode surfaces (website calendar, dashboard) still see the raw (inverted) score. Option B below is the canonical fix that will unify every surface on one field in the correct direction.
+> [!todo] Steps 1–3 DONE (2026-04-12). Steps 4–5 remain.
+> **Status:** Option B steps 1–3 shipped on 2026-04-12. The Cloud Function now writes `segmentedFatigueScore0to10` to `sessionMetrics/{id}`. Agent tools read it via `getCanonicalFatigueScore()`. **Full backfill completed 2026-04-12** — all 1,425 `sessionMetrics` docs exist with 80+ fields (not just fatigue). Stats: 844 from cloud_function, 581 from backfill, 0 from phone. 774 have distance data, 990 have maxSpeed, 108 have segmented fatigue, 56 have ACWR, 948 have regression. Non-Agent-Mode surfaces (website calendar, dashboard) still read from `sensorData` — that's steps 4–5 (Phase D of the migration plan).
 
 **The plan**, from [[SessionMetrics Migration Plan#Phase B — Update the Cloud Function to write cross-session metrics to `sessionMetrics`]]:
 
@@ -663,6 +760,84 @@ Once Steps 1–4 are done and monitored for a week:
 | Website analytics pages | ❌ Raw (wrong) | ✅ Reads new field |
 | iOS app | N/A (no segmented impl) | N/A |
 | RN app | N/A (writes phone-only fields, leaves segmented null for Cloud Function) | ✅ Will auto-read whatever field is written |
+
+---
+
+## TODO: Robust retry classification
+
+> [!todo] Current `runWithResume` auto-retry is too blunt — it treats every failure as retryable
+> When Cora hit the `messages[19].content` 400 on 2026-04-11, the client-side `runWithResume` loop in `components/coach/agent-mode.tsx` re-POSTed the same malformed conversation state three times before giving up (`MAX_AUTO_RESUMES = 3`). All three retries failed with the same permanent 400 because the malformed message was now checkpointed into `agentSessions/{sessionId}` and being reloaded on resume. This wasted ~30 s of coach time and ~15k tokens, and Cora's final answer (which was already fully written before the stream died) was lost.
+>
+> Related: the current retry logic only triggers on `resume_needed` (empty-iteration). It does NOT currently trigger on upstream 5xx or timeouts — those just surface as errors. So we have the opposite problem too: transient failures get no retry while permanent failures get three.
+
+**Failure taxonomy — what retry strategy each class needs:**
+
+| Class | Example | Retry? | Strategy |
+|---|---|---|---|
+| Empty iteration | `content === "" && tool_calls.length === 0` | ✅ Yes | Checkpoint, `resume_needed`, client re-POST. **Already implemented.** |
+| OpenRouter 5xx | `502 Bad Gateway`, `503 Service Unavailable` | ✅ Yes | Exponential backoff (1s → 3s → 8s), max 3 tries. **Not implemented.** |
+| OpenRouter read timeout | 90 s `AbortController` fires | ✅ Yes | Single retry after 2s — might be a cold provider route. **Not implemented.** |
+| OpenRouter 429 rate limit | `429 Too Many Requests` | ✅ Yes | Respect `Retry-After` header. **Not implemented.** |
+| OpenRouter 400 malformed | `messages.[N].content` wrong type | ⚠️ **Self-repair then retry once** | Scan `messages[]`, coerce any object `content` fields to strings via `coerceToolContent()`, retry with sanitized array. If second attempt also fails, surface as permanent. **Not implemented.** |
+| OpenRouter 400 other | Invalid tool schema, unknown param | ❌ No | Permanent — surface immediately with the provider error message. **Not implemented.** |
+| OpenRouter 401 / 403 | Bad API key | ❌ No | Permanent — surface with a clear "check `OPENROUTER_API_KEY`" message. **Not implemented.** |
+| Provider downstream 400 | Alibaba/Groq/Fireworks-specific rejection | ⚠️ Failover | Retry once with OpenRouter's `provider.order` set to exclude the failing one (`provider: {order: [...], allow_fallbacks: true}`). **Not implemented.** |
+| Stream closed unexpectedly | Network flap | ✅ Yes | Checkpoint + resume. **Already implemented via empty-iteration path, but only by accident.** |
+
+**What to build:**
+
+1. **Server-side classifier in `route.ts`.** Wrap every `streamCallOpenRouter` call in a `try/catch` and emit a new SSE event type `retry_decision` with `{class, willRetry, attemptsRemaining, waitMs, reason}`. The client uses this to either silently retry, surface the error, or show a "retrying in 3s…" status label.
+
+2. **Permanent-error SSE event.** Add `emit({type: "error_permanent", message, class})` to the server. Client handles this by stopping the auto-resume loop immediately and showing the error in the chat transcript — no "Cora couldn't finish after multiple retries" wrapper.
+
+3. **Self-repair path for `content` type errors.** Before the 400 retry, walk `messages[]` and coerce any `content` field where `typeof === "object" && !Array.isArray()` to `JSON.stringify(content)`. Log which message index was repaired. If the retry succeeds, we have the evidence of which tool's handler is the culprit and can fix the root cause.
+
+4. **`coerceToolContent()` helper at the single chokepoint** — see gotcha #10. This prevents the 400 from happening in the first place, but the self-repair path above is the backstop for when a new tool gets added and the author forgets.
+
+5. **Checkpoint scrubbing on resume.** In `loadSession()` inside `lib/agent/memory/sessions.ts`, re-run the same `coerceToolContent` scan on every message before handing them back to the tool loop. If a bad message slipped past the original write, the resume path can't propagate it.
+
+6. **Client-side: on `error_permanent`, do NOT increment `resumeCountRef`.** Currently every retry attempt — permanent or not — eats one of the three slots. Permanent errors should short-circuit to `runWithResume` returning immediately with the error visible.
+
+**Files that will change:**
+
+- `app/api/agent/route.ts` — add classifier, new SSE event types, `coerceToolContent` chokepoint around `messages.push({role: "tool", ...})`
+- `components/coach/agent-mode.tsx` — handle `retry_decision` (show status label) and `error_permanent` (break the resume loop, show error)
+- `lib/agent/memory/sessions.ts` — scrub content on load
+- `lib/agent/tools.ts` — audit every `execXxx` return site, ensure `content` is always a string (JSON-stringified for objects)
+
+**Smoke test after implementation:**
+
+- Force a 400 by injecting `{content: {foo: "bar"}}` into a tool result in dev. Confirm: server classifies as `malformed_content`, emits `retry_decision` with self-repair, retry succeeds, debug log shows the repaired message index.
+- Force a 5xx by pointing `OPENROUTER_BASE_URL` at `https://httpstat.us/502`. Confirm: exponential backoff, retries succeed when URL is restored.
+- Force an auth failure by blanking `OPENROUTER_API_KEY`. Confirm: immediate `error_permanent`, no retries, clear message.
+
+---
+
+## TODO: Thinking visibility — stop clobbering rounds at tool boundaries
+
+> [!todo] Coach can't see reasoning between tool calls (reported 2026-04-11)
+> Root cause is documented in gotcha #11 above. The fix is small — a single-file change in `components/coach/agent-mode.tsx` around lines 867–903 — but it needs to be shipped with a manual QA pass because the `ThinkingRounds` component rendering logic is already wired for the multi-round case.
+
+**Files that will change:**
+
+- `components/coach/agent-mode.tsx` — rewrite `onToolCall` and `onThinking` handlers per gotcha #11. That's it.
+
+**What the fix is:**
+
+1. Establish the contract: `thinkingRoundsRef.current[last]` is ALWAYS the currently-streaming round. Non-last entries are completed rounds and never mutated.
+2. `onThinking(token)`: append token to `currentThinkingRef.current`, then `rounds[last] = currentThinkingRef.current`. If `rounds.length === 0`, push first.
+3. `onToolCall(name, args)`: if `currentThinkingRef.current.trim().length > 0`, push a new empty `""` onto `thinkingRoundsRef.current` — this creates the new active round. Reset `currentThinkingRef.current = ""`.
+4. `onToolResult(name, result)`: leave `thinkingRoundsRef.current` alone. The new round is the empty string pushed in step 3; the next `onThinking` tokens will populate it.
+5. Final pruning in the `done` handler (line ~1019) already filters empty rounds: `const finalRounds = thinkingRoundsRef.current.filter(r => r.trim().length > 0)`. That stays.
+
+**Manual QA after fix:**
+
+- Ask Cora a multi-tool question (e.g. "When should I sub Yonathan?"). Expand the thinking panel after the response arrives.
+- Confirm: 3+ distinct rounds visible, each with its own pre-tool-call reasoning. Round 1 should be the `plan_analysis` justification, round 2 the `get_session_timeseries`/`describe_metrics` setup, round 3 the `analyze_with_code` setup, etc.
+- Confirm: the final round (the one before answering) contains the "synthesize the answer" reasoning.
+- Confirm: no round is a repeat or prefix of another — that would mean the clobber bug is still present.
+
+**Related:** the server already emits separate `thinking` SSE events between each tool call (verified in `app/api/agent/route.ts` reasoning-token branch). The server is fine. This is purely a client state-management bug.
 
 ---
 

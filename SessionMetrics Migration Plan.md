@@ -269,6 +269,17 @@ Firestore needs composite indexes for these — the migration script will emit t
 
 ## Implementation phases
 
+> [!info] Phase status as of 2026-04-13
+> | Phase | Status |
+> |---|---|
+> | **A** (phone writes) | ⏳ Not started |
+> | **B** (Cloud Function writes) | ✅ **DONE 2026-04-12** — Full ~60 field payload in `processAndSaveAnalytics`, ACWR in `calculateDailyACWR`, identity resolution (player/team/org lookup) |
+> | **C** (backfill) | ✅ **DONE 2026-04-12** — 1,425 docs with full schema, 80+ fields. Stats: 844 cloud_function, 581 backfill, 774 with distance, 990 with maxSpeed, 108 with fatigue, 56 with ACWR |
+> | **D** (website reads) | ✅ **DONE 2026-04-13** — `getAnalyticsDataForPlayerFast` reads from sessionMetrics. All 3 API routes + analytics barrel switched. Old functions preserved for raw time-series |
+> | **E** (agent tools) | ✅ **DONE 2026-04-13** — All 4 heavy-data tools (`query_team_overview`, `query_game_metrics`, `query_session_metrics`, `load_game_data`) + 4 analytics tools (`list_player_sessions`, `query_metric_summary`, `query_player_insights`, `compare_players`) now read from sessionMetrics |
+> | **F** (RN reads) | ⏳ Not started |
+> | **G** (deprecate derived.stats) | ⏳ Not started |
+
 ### Phase A — Write the new collection from the phone
 
 **File: `Cresento/src/src/utils/SessionUploader.ts`**
@@ -318,36 +329,46 @@ Run in dry mode first, review, then `--yes` for the real backfill.
 
 ### Phase D — Swap website reads to `sessionMetrics`
 
-**Files: `Cresento Website/Cresento.net/lib/firestore.ts`**
+> [!info] ✅ **DONE 2026-04-13**
 
-Add new functions:
-- `getSessionMetrics(sessionId)` — returns `SessionMetricsDoc | null`
-- `getSessionMetricsByOrg(orgId, opts)` — with date range + type filter
-- `getSessionMetricsByPlayer(userId, opts)`
-- `getSessionMetricsByTeam(teamId, opts)`
-- `listSessionMetricsForCalendar(orgId, monthRange)` — replaces the current full `sensorData` scan
+**Implemented in: `lib/session-metrics.ts` (new module) + `lib/analytics/data-fetcher.ts`**
 
-Migrate existing call sites ONE AT A TIME:
-- Sessions calendar → `listSessionMetricsForCalendar`
-- Coach console → `getSessionMetricsByTeam` + direct metric field reads
-- Agent Mode tools → see Phase E
+Reader module (`lib/session-metrics.ts`) provides both client-side and admin-side accessors:
+- Client: `getSessionMetrics`, `getSessionMetricsBatch`, `getSessionMetricsByOrg`, `getSessionMetricsByPlayer`, `listSessionMetricsForCalendar`
+- Admin: `getSessionMetricsAdmin`, `getSessionMetricsBatchAdmin`, `getSessionMetricsByOrgAdmin`, `getSessionMetricsByPlayerAdmin`
 
-Keep the old `getSensorData*` functions alive for chart rendering and the agent mode sandbox (`analyze_with_code`, `get_session_timeseries`).
+Data fetcher added two fast variants:
+- `transformSessionMetricsToAnalytics(sm, playerId)` — transforms `SessionMetricsDoc` to `AnalyticsSessionData`
+- `getAnalyticsDataForPlayerFast(playerIdOrUserUid, orgId, opts)` — same output shape as `getAnalyticsDataForPlayer` but reads from `sessionMetrics` (~1.5 KB) instead of `sensorData` (~5 MB)
+
+All 3 player API routes switched:
+- `app/api/players/[id]/compare/route.ts`
+- `app/api/players/[id]/insights/route.ts`
+- `app/api/players/[id]/progress/route.ts`
+
+Old `getSensorData*` functions preserved for chart rendering and sandbox tools that need raw time-series.
 
 ### Phase E — Swap Agent Mode tools to `sessionMetrics`
 
+> [!info] ✅ **DONE 2026-04-13**
+
 **File: `lib/agent/tools.ts`**
 
-- `query_team_overview` → read from `sessionMetrics` directly (flat fields mean no more `SUMMARY_STAT_MAP` extractor table, just direct field access)
-- `query_game_metrics` → same
-- `query_session_metrics` → read `sessionMetrics/{id}` directly
-- `query_metric_summary` → can now use Firestore `where()` + `orderBy()` for trends instead of full-scan-then-sort
-- `compare_players` → parallel `getSessionMetricsByPlayer` calls, much smaller payload
-- `load_game_data` → unchanged, still needs `sensorData` roster info
-- `get_session_timeseries` → unchanged (still reads raw from `sensorData`)
-- `analyze_with_code` → unchanged (still needs raw for full-resolution math)
+Heavy-data tools swapped (biggest savings):
+- `query_team_overview` → `getSessionMetricsByOrgAdmin()` + flat `SM_FIELD_MAP` (replaces `SUMMARY_STAT_MAP` + full sensorData scan)
+- `query_game_metrics` → `getSessionMetricsBatchAdmin()` (one batch read replaces N parallel `getFullSensorDataCached` calls)
+- `query_session_metrics` → `getSessionMetricsAdmin()` (single 1.5 KB doc replaces 5 MB sensorData)
+- `load_game_data` → `getSessionMetricsBatchAdmin()` (batch read replaces per-session `getSensorDataBySession`)
 
-Also: update `lib/agent/metric-docs.ts` to reflect the new unambiguous fatigue field names and drop the "label bug" gotchas since the migration fixes them.
+Analytics tools also swapped:
+- `list_player_sessions` → `getAnalyticsDataForPlayerFast()`
+- `query_metric_summary` → `getAnalyticsDataForPlayerFast()`
+- `query_player_insights` → `getAnalyticsDataForPlayerFast()`
+- `compare_players` → `getAnalyticsDataForPlayerFast()`
+
+Unchanged (still need raw `sensorData`):
+- `get_session_timeseries` — reads raw time-series for charts
+- `analyze_with_code` — sandbox needs full-resolution data
 
 ### Phase F — Update the RN app's read paths
 

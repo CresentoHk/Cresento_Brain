@@ -98,19 +98,19 @@ See: [[Cresento Website#Sessions calendar]]
 
 See: [[StatsEngine Cross-Platform]]
 
-> [!info] Partially fixed 2026-04-11 — Agent Mode reads are flipped, stored data is not
+> [!info] Fixed (Agent Mode) 2026-04-12 via Option B — canonical `sessionMetrics` field
 > There are TWO implementations of segmentedFatigueScore in the codebase (Cloud Function at `functions/src/analytics-utils.ts:252` and client-side at `lib/utils.ts:249`). Both produce scores where **higher = LESS fatigued** (the ratio end/peak is closer to 1). Every coach-facing label says the OPPOSITE.
 >
-> **Current state after commit `e17c443` (Option A):**
-> - ✅ Agent Mode tools flip the direction at read time via `flipSegmentedFatigue(raw) = 10 - raw` in `lib/agent/tools.ts`. Five read sites covered: SUMMARY_STAT_MAP, execQueryGameMetrics, execQuerySessionMetrics, execGetSessionTimeseries, fatigue_comparison chart case.
-> - ✅ Every scalar the model sees in Agent Mode is now in the label direction (higher = more fatigued).
-> - ✅ `metric-docs.ts` describes the label direction unambiguously.
-> - ❌ Stored Firestore data is still in the raw (inverted) direction.
-> - ❌ Non-Agent-Mode website UI (sessions calendar, dashboard, game analytics page) still reads the raw score — a coach reading the calendar sees the OLD direction.
-> - ❌ Neither formula has been rewritten; both still output the raw direction.
-> - ❌ Inside the `analyze_with_code` sandbox, `<alias>.precomputed.segmentedFatigue.score` is still the RAW value. Code that reads it must apply `10 - score` manually. The sandboxCatalog entry now carries a warning.
+> **Current state after Option B shipped (2026-04-12):**
+> - ✅ Cloud Function (`functions/src/index.ts`) writes `segmentedFatigueScore0to10` (10 - rawScore) to `sessionMetrics/{sessionId}` on every analytics run.
+> - ✅ Backfill completed 2026-04-12: `scripts/backfill-sessionMetrics.mjs` populated all 1,425 `sessionMetrics` docs with full 80+ field schema. Focused fatigue backfill (`scripts/backfill-fatigue-score.mjs`) also verified — 108 sessions with fatigue data covered.
+> - ✅ Agent Mode tools read `sessionMetrics/{sessionId}.segmentedFatigueScore0to10` via `getCanonicalFatigueScore()`, falling back to `flipSegmentedFatigue()` for unbackfilled sessions. Four individual-session sites covered: execQueryGameMetrics, execQuerySessionMetrics, execGetSessionTimeseries, fatigue_comparison chart. Team overview (SUMMARY_STAT_MAP) still uses sync flip.
+> - ✅ `metric-docs.ts` describes the canonical field as the source of truth.
+> - ⚠️ Inside the `analyze_with_code` sandbox, `<alias>.precomputed.segmentedFatigue.score` is still the RAW value. Code that reads it must apply `10 - score` manually.
+> - ❌ Non-Agent-Mode website UI (sessions calendar, dashboard, game analytics page) still reads the raw score from `sensorData`. Migrating those is Step 4 of the full plan and needs a feature flag on `sessions-calendar.tsx`.
+> - ❌ Neither formula has been rewritten; both still output the raw direction. The canonical flip happens at write-time in the Cloud Function and backfill script.
 >
-> **Canonical fix (Option B)** is deferred and tracked as a TODO in [[Agent Memory System#Option B — canonical segmentedFatigue migration (TODO)]]. It implements Phase B of [[SessionMetrics Migration Plan]]: Cloud Function writes `segmentedFatigueScore0to10` (already flipped) to the new `sessionMetrics` collection, backfill runs for historical docs, Agent Mode + website UI read the new field directly. This is the right long-term fix.
+> **Remaining work:** Website UI migration (Step 4) and final cleanup (Step 5: remove `flipSegmentedFatigue`, remove sandbox warnings). Tracked in [[Agent Memory System#TODO: Option B — canonical segmentedFatigue migration]].
 >
 > See [[Firestore Collection Audit 2026-04-11#Label/formula bug discovered in segmentedFatigueScore]] for the full original investigation.
 
