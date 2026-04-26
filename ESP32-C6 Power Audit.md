@@ -1178,6 +1178,68 @@ Avoided `esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, OFF)` — on C6's new PMU
 
 ---
 
+## 2026-04-25 follow-up #22 — Cycle-stretch options (Knob A shipped, Knob B deferred)
+
+User observed the chip cycling fast between 4 mA (deep sleep) and 40 mA (drain wake) and asked how to spend more time at 4 mA.
+
+### Why the cycle exists
+
+In DSL, the BMI270 streams accel + gyro into its 2 KB FIFO at 100 Hz × 13 B/frame = **1300 B/s**. When the FIFO crosses `DSL_FIFO_WATERMARK_BYTES`, INT1 fires and wakes the chip. The chip drains the FIFO (~150 ms), writes a chunk to LittleFS, and re-enters deep sleep.
+
+```
+sleep duration = watermark / 1300
+cycle period   = sleep + ~150 ms drain
+% time asleep  = sleep / cycle
+```
+
+### Knob A — bump watermark within FIFO budget (SHIPPED)
+
+Pushed `DSL_FIFO_WATERMARK_BYTES` from 1690 → 2000 ([shinpad_c6.ino:203](Rishab_PCB_esp32c6/shinpad_c6/shinpad_c6.ino:203)).
+
+| Watermark | Sleep | Cycle | % sleep | Avg current (USB-bench) |
+| --------- | ----- | ----- | ------- | ----------------------- |
+| 1690 (was) | 1.30 s | 1.45 s | 90% | ~6 mA |
+| **2000 (now)** | **1.54 s** | **1.69 s** | **91%** | **~5.5 mA** |
+| 2040 (max) | 1.57 s | 1.72 s | 91% | ~5.4 mA |
+
+Marginal additional gain past 2000 (FIFO max is 2048 B; need ~8 B headroom for one frame). 48 B of headroom at 2000 = 36 ms of fill — plenty even if a wake gets delayed.
+
+### Knob B — drop chip ODR (POTENTIAL, NOT YET SHIPPED)
+
+The bigger lever is the BMI270's sample rate. The minimum combined ODR is **25 Hz** (gyro floor; accel can go lower but they must match for clean header-mode FIFO frames).
+
+| Chip ODR | FIFO fill rate | Watermark | Sleep | Cycle | % sleep | Avg current | Decim ratio | Required SAMPLE_HZ |
+| -------- | -------------- | --------- | ----- | ----- | ------- | ----------- | ----------- | ------------------ |
+| 100 Hz (current) | 1300 B/s | 2000 | 1.54 s | 1.69 s | 91% | ~5.5 mA | 5:1 | 20 ✓ |
+| 50 Hz | 650 B/s | 2000 | 3.08 s | 3.23 s | 95% | ~4.5 mA | 2:1 | 25 |
+| 25 Hz | 325 B/s | 2000 | 6.15 s | 6.30 s | 98% | ~4.2 mA | 1:1 | 25 |
+
+The decim ratio `DSL_DECIMATE = DSL_CHIP_ODR_HZ / SAMPLE_HZ` must be an integer. So dropping the chip to 50 or 25 Hz forces `SAMPLE_HZ = 25`.
+
+### Cost of Knob B: app-side sample-rate audit
+
+`SAMPLE_HZ` is written into the file header (`fh.sample_hz`) at session start. The decoder reads it from there. In theory all time-based metrics derive from `sample_hz` and adapt cleanly. In practice, hardcoded "20" or "50ms" assumptions may exist downstream. Need to grep the following before flipping:
+
+- **RN app**: `Cresento/src/src/utils/StatsEngine.ts` — peak detection windows, sprint detection thresholds, fatigue index time bins
+- **Website**: `Cresento Website/Cresento.net/lib/analytics/` — service.ts, stats.ts, trends.ts (~5 files)
+- **iOS app**: `DataRecoveryIOS/.../StatsEngine.swift` — same metrics
+- **Vision system / pose-fusion**: `text_ai_coach/`, `experimental_implementation/` — should be header-driven but verify
+- **Any test fixtures or sample CSVs** that assume 20 Hz
+
+Look for: `20` (literal), `50` (interval ms), `0.05` (seconds), `0.02` (period), `WINDOW_SIZE` style constants tied to sample count.
+
+### When to ship Knob B
+
+- ~3 mAh saved per 90-min game vs Knob A alone (5.5 mA → 4.2 mA × 1.5 hr)
+- 500 mAh LiPo runtime: 83 h → 119 h (still within "many sessions per charge" range either way)
+- Net win: small enough that the audit cost dominates. Defer until the rest of the firmware/app stack is locked down.
+
+### Re-enabling NimBLE migration as additional escalation
+
+If we ever want DSL with periodic BLE check-ins (live-stream during a game, or remote stop without button press), follow-up #21's NimBLE migration playbook is the path. Knob A + B + NimBLE together = ~3-4 mA average even with check-ins, ideally.
+
+---
+
 ## 2026-04-25 follow-up #21 — BUTTON_END_DSL hybrid architecture shipped
 
 After follow-up #20 disabled DSL outright (legacy 20 Hz polling, ~30-40 mA), revisited the deep-sleep architecture with a different sleep/wake pattern that **avoids the bug class entirely**.
