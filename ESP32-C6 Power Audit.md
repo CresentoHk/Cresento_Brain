@@ -1178,6 +1178,160 @@ Avoided `esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, OFF)` — on C6's new PMU
 
 ---
 
+## 2026-04-25 follow-up #21 — BUTTON_END_DSL hybrid architecture shipped
+
+After follow-up #20 disabled DSL outright (legacy 20 Hz polling, ~30-40 mA), revisited the deep-sleep architecture with a different sleep/wake pattern that **avoids the bug class entirely**.
+
+### The insight
+
+The crash root cause from #20: repeated `BLEDevice::init()` across deep sleep wakes (~30 inits in a 90-min game with the check-in cadence) accumulates BT controller state that eventually faults. We can't `BLEDevice::deinit(true)` to clean up (panics, see #17). No fix is available in Arduino-ESP32 v3.2.0 / IDF 5.4.
+
+If the number of BLE inits per session is small (~2: pre-START + post-button), the fault doesn't trigger. So the architecture: **drop the periodic BLE check-ins entirely; use a button press as the user-driven end-of-session signal**.
+
+### Architecture
+
+```
+        ┌────────────────────────────────────────────────┐
+        │  IDLE/ADV   ~30-40 mA                          │
+        │  - LED: fast blink (5 Hz)                      │
+        └─────────┬──────────────────────────────────────┘
+                  │ phone sends START_LOG via BLE
+                  ▼
+        ┌────────────────────────────────────────────────┐
+        │  DSL LOGGING   ~5 mA average                   │
+        │  - BLE NOT used during this period             │
+        │  - LED: OFF (deep sleep)                       │
+        │  - INT1 wake: drain FIFO every ~1.3 s          │
+        │  - Button wake: end session                    │
+        └────┬────────────────────┬──────────────────────┘
+             │ INT1                │ button press
+             ▼                     ▼
+        ┌──────────────┐   ┌──────────────────────────────┐
+        │ Drain FIFO,  │   │  END SESSION                 │
+        │ chunk_flush, │   │  - flush + close file        │
+        │ back to sleep│   │  - clear loggingState        │
+        └──────────────┘   │  - fall through to setup()   │
+                           │    rest (re-init BLE,        │
+                           │    advertise)                │
+                           └──────────┬───────────────────┘
+                                      ▼
+                           ┌──────────────────────────────┐
+                           │  POST-SESSION   ~30-40 mA    │
+                           │  - LED: fast blink           │
+                           │  - Phone connects → STOP_LOG │
+                           │  - Replay file → DONE        │
+                           └──────────────────────────────┘
+```
+
+### Implementation in [shinpad_c6.ino](Rishab_PCB_esp32c6/shinpad_c6/shinpad_c6.ino)
+
+1. **New flag** `USE_BUTTON_END_DSL = 1` (requires `USE_DEEP_SLEEP_LOGGING = 1`).
+2. **Wake-source mask** — `enterLoggingDeepSleep` now configures `(1<<PIN_IMU_INT) | (1<<PIN_BTN)` as a bitmask wake source on HIGH level. Both pins are LP-IO capable (datasheet Table 2-7).
+3. **Wake routing** — `fastPathLoggingWake` reads `esp_sleep_get_gpio_wakeup_status()` to determine which pin fired:
+   - INT1 → drain FIFO + back to sleep (no BLE)
+   - Button → flush chunker + close file + clear `loggingState.magic` + return `true` (stay awake)
+   - Timer → safety net, drain + back to sleep
+4. **Wake router fall-through** — when the button wake returns true, the wake router in `setup()` now falls through (under `#if USE_BUTTON_END_DSL`) to the rest of cold-boot init: WiFi off, PM config, sensor power, I2C, BMI270 re-init, MMC5603 init, BLE init, advertise. Phone can then connect and send `STOP_LOG` against the existing file.
+5. **LED state machine** updated per user spec:
+   - USB present → 1 Hz blink (charging proxy, takes priority)
+   - `bleConnected` → solid
+   - else → 5 Hz fast blink (advertising / waiting)
+   - Deep sleep → off (LED loses power, can't control)
+6. **Button INPUT_PULLDOWN** in the deep-sleep path — same treatment as the active-mode pin, ensures the wake source isn't triggered by a floating pin.
+
+### Edge cases handled
+
+| Case | Behavior |
+| ---- | -------- |
+| User holds button >1500 ms after button-wake | Falls into the existing `buttonTick` hold-to-sleep path → full power-off via `enterDeepSleep()`. Session file preserved on flash. Cold boot from next button press. |
+| User forgets to press button | Chip keeps drain-cycling until LiPo dies. Data on flash. Plug USB → `force_stop` serial command recovers it. |
+| Phone disconnects during STOP_LOG flow | Existing disconnect-rescue path: re-advertise (slow). User can reconnect. |
+| New session immediately after old one | After STOP_LOG completes, `loggingState` is cleared. New START_LOG triggers fresh DSL handoff. |
+
+### Power numbers (modeled, not yet measured)
+
+| Phase | Duration in 90 min game | Current |
+| ----- | ------------------------ | ------- |
+| Pre-start advertising | ~1 min | ~35 mA |
+| **DSL logging** | **~88 min** | **~5 mA** |
+| Post-button BLE up | ~30 sec | ~35 mA |
+| Total session battery | ~7.5 mAh | |
+
+500 mAh LiPo runtime ≈ **66 sessions per charge**, vs ~9 sessions on the legacy 20 Hz polling path.
+
+### What to verify on first test
+
+1. `state` serial command shows `loggingState.magic=0xC6F1F0C6 active=1` while session is in deep sleep
+2. Reveal log shows `[DSL-sleep] enter` → `[boot] reset_reason=8 (DEEPSLEEP) bootCount=N` (climbing N) → `[DSL-wake] gpio_wakeup_status=0x1 button=0 int1=1` for INT1 wakes
+3. After button press: `[DSL-wake] gpio_wakeup_status=0x2 button=1 int1=0` → `[BUTTON-DSL] button press detected` → setup falls through → BLE up
+4. Phone can connect within ~2 sec (slow adv at 1000-1500 ms) and STOP_LOG completes the replay
+5. Bench current: ~5 mA during the deep-sleep phase (with USB-C bias maybe 8-10 mA), ~35 mA during BLE-up phases
+
+If any of those fail (especially #1 going to POWERON instead of DEEPSLEEP), we've hit a different bug — likely the same controller-state issue would surface even with 2 inits if something else is off.
+
+---
+
+## Future: NimBLE migration as escalation path
+
+If `BUTTON_END_DSL` ever fails for the same controller-state reason, OR if we need DSL-style architecture with periodic BLE check-ins (e.g. for live-stream during a game), the next escalation is replacing Bluedroid with NimBLE.
+
+### What NimBLE buys us
+
+- ~50% less RAM than Bluedroid
+- Different controller-interaction model that's reportedly better-behaved across sleep cycles
+- Maintained as an alternative BLE stack in IDF 5.x; supported on ESP32-C6
+- `NimBLE-Arduino` library on GitHub (`h2zero/NimBLE-Arduino`) installable via Arduino Library Manager
+
+### Migration cost
+
+Mostly mechanical search/replace:
+
+| Bluedroid | NimBLE |
+| --------- | ------ |
+| `#include <BLEDevice.h>` | `#include <NimBLEDevice.h>` |
+| `BLEDevice::init("name")` | `NimBLEDevice::init("name")` |
+| `BLEDevice::setPower(level)` | `NimBLEDevice::setPower(level)` |
+| `BLECharacteristic::PROPERTY_READ \| PROPERTY_NOTIFY` | `NIMBLE_PROPERTY::READ \| NIMBLE_PROPERTY::NOTIFY` |
+| `BLE2902` descriptor | implicit (NimBLE auto-creates the CCCD if PROPERTY_NOTIFY is set) |
+| `setCallbacks(new MyCB)` | identical |
+| `getValue()` returns `String` | returns `std::string` (same v2.x quirk) |
+
+**Risk:** the migration itself could introduce subtle bugs (CCCD callback semantics differ slightly, MTU negotiation behavior, etc.). Save it for after `BUTTON_END_DSL` proves not enough.
+
+### Migration checklist (when the time comes)
+
+1. Install `NimBLE-Arduino` via Arduino Library Manager (or `arduino-cli lib install NimBLE-Arduino`)
+2. In `shinpad_c6.ino`: swap `BLEDevice.h` → `NimBLEDevice.h`, `BLEServer.h` → `NimBLEServer.h`, etc.
+3. Replace `BLE2902` descriptor adds with the implicit NimBLE pattern
+4. Update `BLECharacteristic::PROPERTY_*` to `NIMBLE_PROPERTY::*`
+5. Verify `getValue()` return type — may need to switch String/std::string handling
+6. Re-enable the BLE check-in path (set `USE_BUTTON_END_DSL = 0`) and test 30+ check-in cycles in a row to see if the controller fault goes away
+7. If it does: done — DSL with check-ins is now safe, ~5 mA average even with periodic BLE
+8. If not: NimBLE didn't help on C6 either; stick with `BUTTON_END_DSL`
+
+### What we've discussed and tried (timeline, 2026-04-25)
+
+| Attempt | Outcome |
+| ------- | ------- |
+| Original DSL with timer-only wake + BLE check-ins | Crashes after ~60 s (POWERON) |
+| Add gpio_hold_en for D2 | Sensors stay powered ✓ |
+| Disable brownout detector | BOD reset eliminated ✓ |
+| Drop BLE TX power from P9 → N0 | Brownout fully resolved ✓ |
+| Fix BMI270 FIFO frame parser (0x8C, 0x88, 0x44, 0x40, 0x48, 0x80) | Drain works ✓ |
+| Fix Input_Config payload size (1 byte when fifo_time_en=0) | Parser stops desyncing ✓ |
+| INT1 GPIO0 wake working primary, timer fallback | INT1 wakes confirmed (`cause=7`) ✓ |
+| chunker_flush() in stopAndReplay DSL branch | No more dropped tail rows ✓ |
+| dataNotifReady gate restored | Replay no longer races phone subscription ✓ |
+| Remove `BLEDevice::deinit(true)` panic | Chip stops crashing on START_LOG ✓ |
+| Button INPUT_PULLDOWN (schematic-driven) | No more spurious hold-to-sleep ✓ |
+| Loop delay 1ms → 20ms | No measurable power difference (Bluedroid PM lock dominates) |
+| TX power N0 → N3 + adv preferred + updateConnParams | iOS couldn't reconnect; reverted |
+| **BUTTON_END_DSL hybrid (current)** | **~5 mA average target; pending bench verification** |
+
+The takeaway: **the schematic and BMI270 are not the blocker; the schematic supports DSL cleanly. The blocker is Bluedroid/IDF behavior across deep sleep wakes.** All hardware-side work is done. Future power optimization is a software-stack question (NimBLE) or an architecture question (button-driven session boundaries, which is where we are now).
+
+---
+
 ## 2026-04-25 follow-up #20 — DSL DISABLED; legacy 20 Hz polling restored
 
 After follow-ups #14–19 each individually fixed real bugs, the deep-sleep-during-logging architecture is still **fundamentally unreliable** on this chip. Final test: 3.5 min recorded → 68 s of recovered data, "took forever" before phone could reconnect, "random and inconsistent". Final reveal showed `[boot] reset_reason=1 (POWERON) bootCount=1 — 44 bytes used / 3072 total`, meaning the RTC log buffer was wiped — i.e. the chip hard-reset DURING deep sleep mid-session.
