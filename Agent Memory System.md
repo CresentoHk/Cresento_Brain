@@ -780,7 +780,7 @@ Once Steps 1–4 are done and monitored for a week:
 | OpenRouter 429 rate limit | `429 Too Many Requests` | ✅ Yes | Respect `Retry-After` header. **Not implemented.** |
 | OpenRouter 400 malformed | `messages.[N].content` wrong type | ⚠️ **Self-repair then retry once** | Scan `messages[]`, coerce any object `content` fields to strings via `coerceToolContent()`, retry with sanitized array. If second attempt also fails, surface as permanent. **Not implemented.** |
 | OpenRouter 400 other | Invalid tool schema, unknown param | ❌ No | Permanent — surface immediately with the provider error message. **Not implemented.** |
-| OpenRouter 401 / 403 | Bad API key | ❌ No | Permanent — surface with a clear "check `OPENROUTER_API_KEY`" message. **Not implemented.** |
+| OpenRouter 401 / 403 | Bad API key | ⚠️ Key failover (already) | `executeWithKeyFailover` in `lib/agent/key-pool.ts` tries every key in `config/openrouter` in priority order before surfacing. When the user *does* see a 401 at the client, it means **every key in the pool failed** — rotate the pool, don't blame the code. Classifier-level "permanent" handling after pool exhaustion still **not implemented**. |
 | Provider downstream 400 | Alibaba/Groq/Fireworks-specific rejection | ⚠️ Failover | Retry once with OpenRouter's `provider.order` set to exclude the failing one (`provider: {order: [...], allow_fallbacks: true}`). **Not implemented.** |
 | Stream closed unexpectedly | Network flap | ✅ Yes | Checkpoint + resume. **Already implemented via empty-iteration path, but only by accident.** |
 
@@ -810,6 +810,13 @@ Once Steps 1–4 are done and monitored for a week:
 - Force a 400 by injecting `{content: {foo: "bar"}}` into a tool result in dev. Confirm: server classifies as `malformed_content`, emits `retry_decision` with self-repair, retry succeeds, debug log shows the repaired message index.
 - Force a 5xx by pointing `OPENROUTER_BASE_URL` at `https://httpstat.us/502`. Confirm: exponential backoff, retries succeed when URL is restored.
 - Force an auth failure by blanking `OPENROUTER_API_KEY`. Confirm: immediate `error_permanent`, no retries, clear message.
+
+> [!info] Runbook — "OpenRouter error 401: User not found"
+> This error only reaches the client after **every key in `config/openrouter`** has been tried and failed. Don't look for a code bug — rotate the pool:
+> 1. Open https://openrouter.ai/keys → check which keys still exist and have balance. Keys deleted from the OpenRouter dashboard return `User not found`, not a generic 401.
+> 2. Edit Firestore `config/openrouter` → replace the dead key(s), keep `disabled: false`, or set `disabled: true` to skip them.
+> 3. Cache TTL is 60 s per warm serverless instance (`CACHE_TTL_MS` in `lib/agent/key-pool.ts`). Wait a minute or redeploy.
+> 4. Env-var fallback (`OPENROUTER_API_KEY`, `_2`…`_10`) is only used when the Firestore doc is empty/missing — useful for local dev.
 
 ---
 

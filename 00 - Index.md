@@ -48,14 +48,18 @@ Cresento is a sports analytics platform for soccer coaches and athletes. It span
 
 ---
 
+## 📝 Notebook templates
+
+- [[Notebook Template (Vision System)]] — canonical install + config + detection cells for new vision-pipeline notebooks. Copy these verbatim.
+
 ## 🔗 Shared Systems
 
 These are crosscutting — touching them affects every platform.
 
 - [[Firebase Backend]] — auth, Firestore collections, paging rules
 - [[Firestore Collection Audit 2026-04-11]] — current inventory + cleanup plan
-- [[Security Audit 2026-04-14]] — website vulnerabilities, prioritized (3 critical, unfixed)
-- [[Tech Debt Audit 2026-04-14]] — website tech debt (Phase 1 shipped; Phase 2 in progress)
+- [[Security Audit 2026-04-14]] — website vulnerabilities, prioritized (0 critical + 0 high remaining; 7 medium/low tasks open across Phases 3–5)
+- [[Tech Debt Audit 2026-04-14]] — website tech debt · **paused 2026-04-15** · Phases 1 + 2-partial shipped on branch `tech-debt-phase-1` (not pushed yet) · next: Phase 2c firestore split + Phase 3
 - [[SessionMetrics Migration Plan]] — flat queryable session metrics schema (Phases B–E done)
 - [[SessionMetrics Consistency Plan]] — file-by-file edit plan for RN + website sync
 - [[SessionMetrics RN Migration (Phases A+F)]] — what the RN app needs for Phase F reads
@@ -69,12 +73,14 @@ These are crosscutting — touching them affects every platform.
 ## 🔧 Hardware
 
 - [[Hardware Overview]] — nRF52811 vs ESP32-S3 boards, sensors, pinouts
+- [[ESP32-C6 Power Audit]] — where current is going on the XIAO daughter-board firmware, ranked optimization plan
 
 ---
 
 ## 🧪 Proposals / Exploration
 
 - [[Proposal - ESP-NOW Mesh Gateway]] — pad-to-pad ESP-NOW mesh so out-of-range pads forward data through neighbors to a gateway pad. Status: exploring, needs Phase 0 range test.
+- [[Proposal - Falcon Perception + Gemma Role and Team Assignment]] — replace H1–H5 KMeans jersey-color stack with Gemma palette priming + grounded-detection role correction at keyframes. Colab-sized. Status: exploring, needs Falcon VRAM spike on T4.
 
 ---
 

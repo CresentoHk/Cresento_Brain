@@ -6,7 +6,9 @@ tags:
   - frontend
   - tech-debt
 created: 2026-04-14
-status: phase-1-complete
+status: paused-phase-2-partial
+paused: 2026-04-15
+next-up: phase-2c-firestore-split-then-phase-3
 ---
 
 # 🧹 Cresento Website Tech Debt Audit — 2026-04-14
@@ -15,8 +17,25 @@ Tech debt inventory for the Next.js website at `Cresento Website/Cresento.net/`.
 
 Related: [[Cresento Website]] · [[Security Audit 2026-04-14]] · [[Firestore Collection Audit 2026-04-11]] · [[01 - Critical Preservation Rules]]
 
-> [!success] Phase 1 shipped — 2026-04-15
-> Branch `tech-debt-phase-1` off `agent-demo`. 5 atomic commits, `npm run build` green, 61 transitive packages dropped. See [[#Phase 1 — Shipped 2026-04-15]] below.
+> [!success] Phase 1 shipped + Phase 2 partial — 2026-04-15
+> Branch `tech-debt-phase-1` off `agent-demo`. **9 atomic commits total**, `npm run build` green at every step.
+> - **Phase 1**: lockfile + deps + chart consolidation + `lib/log.ts`. See [[#Phase 1 — Shipped 2026-04-15]].
+> - **Phase 2a+2b+2d**: wrapper bypass cleanup (6 files), bounded `getRecentSensorDataByOrg`, `ARCHITECTURE.md`. See [[#Phase 2 — Shipped 2026-04-15]].
+> - **Phase 2c (firestore.ts split)**: explicitly deferred to its own PR by user.
+
+> [!todo] 🔖 Pick up here next session
+> **Paused 2026-04-15.** Branch `tech-debt-phase-1` is committed but **not pushed** and **not merged**. Starting point for next session:
+>
+> 1. **Decide on the current branch**: push `tech-debt-phase-1` and open a PR against `agent-demo`, OR merge locally, OR keep iterating.
+> 2. **Phase 2c — `lib/firestore.ts` split** (the big one that was deferred). See [[#Phase 2c — Deferred]] below for the plan. Suggest starting a fresh `tech-debt-phase-2c` branch off whatever base is clean at that point.
+> 3. **Phase 3 — not started**. See [[#Phase 3 — Not started]] below. Biggest candidates:
+>    - Extract `<AgentMode/>` from `app/coach/page.tsx` (1,609 LOC mega-component).
+>    - Decompose `components/sessions/sessions-view.tsx` (6,133 LOC).
+>    - Lazy-load heavy chart components.
+>    - Add component/integration tests.
+> 4. **Caller migration**: `app/sessions/analytics/page.tsx` still uses the deprecated `getSensorDataByOrg`. Swap it to `getRecentSensorDataByOrg({ orgId, limit: 50 })` once you confirm the page actually wants "recent" semantics.
+>
+> **Before editing any of the files from these phases, re-read [[01 - Critical Preservation Rules]] and the scope-boundary callout above.** The mega-components overlap with load-bearing code (agent, calendar, session state machine).
 
 > [!warning] Scope boundary
 > Do **NOT** touch anything in `lib/agent/memory/*`, `app/api/agent/route.ts` token/duration limits, session state machine logic, or anything listed in [[01 - Critical Preservation Rules]]. Phase-1 remediation is only the "safe" items below.
@@ -205,14 +224,110 @@ import { ClientOnly } from "@/components/client-only"
 
 ---
 
-## Phase 2 — In Progress 2026-04-15
+## Phase 2 — Shipped 2026-04-15
 
-Plan (see audit body above for context):
+Same branch as Phase 1 (`tech-debt-phase-1`). 4 additional atomic commits. Build verified green at each step.
 
-1. Split `lib/firestore.ts` into `lib/firestore/{reads,writes,cache,tracking,types}.ts` via barrel file — no caller changes.
-2. Reroute the 4 direct `firebase/firestore` imports through the wrapper.
-3. Add a bounded-page variant of `getSensorDataByOrg` (line 2077 fan-out).
-4. Write `ARCHITECTURE.md` covering data flow + Session/SessionGroup/Game migration.
+### Commits
+
+| # | SHA       | Change                                                                                                            |
+| - | --------- | ----------------------------------------------------------------------------------------------------------------- |
+| 6 | `6cca5fd` | Added 4 wrapper functions: `getTeam`, `getUserProfile`, `getPlayerRecordsByUserUid`, `getClassAverages`           |
+| 7 | `c134f38` | Routed 6 UI files through the firestore wrapper; removed their `firebase/firestore` imports                       |
+| 8 | `ddeafef` | Added bounded `getRecentSensorDataByOrg`; deprecated unbounded `getSensorDataByOrg`                               |
+| 9 | `e5d4ae9` | Added `ARCHITECTURE.md` covering data flow, wrapper rules, session model, agent pointers                         |
+
+### Phase 2a — Wrapper bypass cleanup (6 files)
+
+Fixed 6 UI-layer files that were importing `firebase/firestore` directly and bypassing `lib/firestore.ts` — explicitly forbidden by CLAUDE.md:
+
+- `components/analytics/trends-comparison.tsx` — `ClassAverages/Football` fetch
+- `components/analytics/class-comparison.tsx` — same
+- `components/analytics/class-comparison-tabbed.tsx` — same
+- `components/sessions/sessions-view.tsx` — 3× `ClassAverages/Football` fetches
+- `app/teams/page.tsx` — team lookup + player records by uid
+- `app/teams/[id]/page.tsx` — team + player records + user profile lookups
+
+All now go through new wrapper functions. `/teams` and `/teams/[id]` bundle sizes dropped slightly with `firebase/firestore` no longer pulled in at the page level.
+
+### Phase 2b — Bounded `getRecentSensorDataByOrg`
+
+The original `getSensorDataByOrg` had two latent bugs:
+
+1. **Unbounded fan-out** — loads every sensor doc for every player in the org (tens of MB on large orgs).
+2. **Silent 30-player cap** — Firestore's `where("userID", "in", [...])` limit.
+
+New function in `lib/firestore.ts`:
+
+```ts
+getRecentSensorDataByOrg({ orgId, limit?, since? })
+```
+
+- Chunks player-id array into groups of 30 and runs queries in parallel.
+- Accepts per-player `limit` (default 50) and optional `since` lower bound.
+- Still avoids a composite index by sorting client-side after fan-in.
+
+Old function kept with `@deprecated` JSDoc so its one caller (`app/sessions/analytics/page.tsx`) can migrate deliberately.
+
+### Phase 2d — `ARCHITECTURE.md`
+
+New file: `Cresento Website/Cresento.net/ARCHITECTURE.md` (~150 lines). Covers:
+
+- Data flow from ShinPad firmware → Firestore → wrapper → UI
+- The wrapper rule (UI never imports `firebase/firestore`), with exception list
+- `lib/log.ts` logging convention
+- Session vs SessionGroup vs deprecated Game/Drill migration state
+- Agent (Cora) entry points + load-bearing limits
+- Pointers into `Cresento_Brain/` for deeper concepts
+
+### Phase 2c — Deferred
+
+> [!info] Full `lib/firestore.ts` split deferred
+> User deliberately chose to land Phase 2a+2b+2d first and defer the 6-file split (`reads/writes/cache/tracking/types/utils`) to its own `tech-debt-phase-2c` branch. Reason: ~95 exports moving across 6 files is a much bigger blast radius than Phase 2a/2b combined, and wants isolation for review.
+
+**Plan when you pick this up again:**
+
+1. Start a fresh branch: `git checkout -b tech-debt-phase-2c` off `agent-demo` (or off `tech-debt-phase-1` if it's merged by then).
+2. Re-run the mapping agent — the export inventory from 2026-04-15 was in a previous session's transient output and is gone. Cheap to regenerate.
+3. Proposed target file layout (from the prior mapping pass):
+   - `lib/firestore/reads.ts` — ~45 `get*` / `list*` / `subscribe*` functions
+   - `lib/firestore/writes.ts` — ~35 `create*` / `update*` / `delete*` / `upload*` functions
+   - `lib/firestore/cache.ts` — `playerCacheEnriched`, `playerCachePlain`, `sessionCache`, `sessionGroupsCache`, `missingImagesCache`, `playerFetchInFlight`, plus `clear*Cache` helpers. **Module-level state lives here, nowhere else.**
+   - `lib/firestore/tracking.ts` — `perfMetrics`, `trackRead`, `trackCache`, `trackStorage`, `getPerformanceMetrics`, `resetPerformanceMetrics`, `printPerformanceReport`
+   - `lib/firestore/types.ts` — re-exports of `SensorData`/`SensorDataSummary`/`SensorDataStats` from `@/lib/types`, plus the interfaces declared in this file (`OrgSyncMetadata`, `DeduplicateResult`, `PlayerSeasonalStats`, `MergeSessionsResult`, `PlayerRank`, `CoachRankings`, `WatchlistEntry`, `CoachWatchlist`, `ACWRDaySnapshot`, `PlayerACWRTimeline`, `TeamACWRTimelineResponse`)
+   - `lib/firestore/utils.ts` — `getDateFromTimestamp`, `computeSessionTimes`, `convertAggregatesToSessions`, `getMonthKeysAround`, `extractSensorDataSummary`, localStorage helpers for `missingImagesCache`
+   - `lib/firestore.ts` — now just a **barrel file**: `export * from "./firestore/reads"`, etc. Keeps every existing `from "@/lib/firestore"` import working.
+4. **Tricky cases to watch**:
+   - `ensurePlayerRecord` is a get-or-create → put in `writes.ts`.
+   - `getTeamMembers` is aliased to `getPlayersByTeam` → keep the alias export.
+   - `loadFullSessionDataInBackground` touches `sessionCache` → lives in `cache.ts` or imports from `cache.ts`.
+   - `flog` (the scoped logger) needs to be imported into each new file separately since it's currently top-of-firestore.ts state.
+   - Do not break the `@deprecated` comment on `getSensorDataByOrg`.
+5. After the split, run `npm run build` and grep for any caller still importing `from "@/lib/firestore/*"` directly (they should all go through the barrel).
+
+**Risk:** High. 20+ files import from `@/lib/firestore`. The barrel file strategy is specifically to keep their imports unchanged, but it only works if every export is re-exported correctly. A quick sanity check: `git diff --stat` on the caller files should show **zero caller changes** from a well-executed split.
+
+### Phase 2 impact
+
+- **Wrapper compliance**: 6 UI files no longer bypass `lib/firestore.ts`. `firebase/firestore` imports outside `lib/*` are now zero (except `lib/analytics/data-fetcher.ts` which is the analytics engine by design).
+- **Reliability**: `getRecentSensorDataByOrg` fixes a silent 30-player ceiling that would throw on any org with more members.
+- **Onboarding**: `ARCHITECTURE.md` gives new contributors an entry point that isn't "read 5,000 lines of firestore.ts and guess."
+- **Build**: Green, bundle sizes roughly flat (`/teams` marginally smaller).
+
+---
+
+## Phase 3 — Not started
+
+From the original phased plan. **Touch-as-you-go, not a sprint** — these are big and overlap with load-bearing code.
+
+1. **Extract `<AgentMode/>`** from `app/coach/page.tsx` (1,609 LOC). Easiest Phase 3 win — agent UI is relatively self-contained; pulling it into `components/coach/agent-mode.tsx` (which already exists) and importing it should be straightforward. Check what still lives in `coach/page.tsx` that should move with it.
+2. **Decompose `components/sessions/sessions-view.tsx`** (6,133 LOC) into `<SessionsList/>`, `<SessionDetail/>`, `<SessionCalendar/>` with a shared context. **Highest risk** — this file owns the calendar view, which [[01 - Critical Preservation Rules]] flags as load-bearing. Go in small slices; verify the calendar behavior after each slice.
+3. **Lazy-load heavy charts** — `components/analytics/performance-overlay-chart.tsx` alone is 1,616 LOC. Wrap the analytics bundle with `next/dynamic` so it doesn't land in the `/sessions` first-load JS (currently 534 KB).
+4. **Component tests** — target 30% `components/` coverage per quarter. Start with the components you split in step 1 and step 2 — they're easier to test in isolation than the mega-components they came from. Infrastructure is already there: jest + ts-jest + `__tests__/` directory.
+
+Plus the deferred item:
+
+5. **Full `lib/firestore.ts` split** — see [[#Phase 2c — Deferred]] above for the plan.
 
 ---
 
