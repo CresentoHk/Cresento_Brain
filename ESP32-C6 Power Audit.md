@@ -1178,6 +1178,59 @@ Avoided `esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, OFF)` — on C6's new PMU
 
 ---
 
+## 2026-04-25 follow-up #23 — App-side STOP_LOG fix + watermark math correction
+
+Two bugs found and fixed in the same round.
+
+### Bug 1: Watermark math was wrong (chip side)
+
+Earlier ([#22](#2026-04-25-follow-up-22)) I bumped `DSL_FIFO_WATERMARK_BYTES` from 1690 → 2000 thinking the constraint was `watermark < FIFO_max`. Wrong constraint. The real constraint is:
+
+```
+watermark + (wake_duration × fill_rate) <= FIFO_max
+```
+
+Wake processing is ~150 ms (I2C re-init + 2 KB FIFO read at 400 kHz + chunker compress + flash write). At 1300 B/s fill rate, that's 195 B added during the wake. So:
+
+```
+max_safe_watermark = 2048 - 195 = 1853 B
+```
+
+2000 was over budget → FIFO crossed 2048 mid-wake → BMI270 stream mode overwrote oldest samples → **samples lost**. This is the "half the data" the user reported on recover.
+
+**Reverted** to 1690 ([shinpad_c6.ino:203](Rishab_PCB_esp32c6/shinpad_c6/shinpad_c6.ino:203)). 163 B of headroom = ~125 ms of slack for wake processing variance. Could safely push to 1850 if measured wake duration stays under 150 ms, but the marginal power gain isn't worth the safety margin.
+
+### Bug 2: App's stopLogging didn't re-establish DATA monitor (app side)
+
+Reading the React Native app's BleContext — `Cresento/src/src/contexts/BleContext.tsx`:
+
+| App flow | DATA monitor setup |
+| -------- | ------------------ |
+| `recoverDataFromChip` (line 2607) | **Yes — fresh monitor created before sending STOP_LOG** |
+| `stopLoggingAndGetCsv` (line 2410+) | **No — relies on monitor from `startLogging`** |
+
+The `startLogging` flow sets up the DATA monitor (line 2222) on the connected device. But in BUTTON_END_DSL, the chip enters deep-sleep right after START_LOG, BLE goes down, the phone gets a disconnect event — and the DATA monitor (tied to the original connection) is invalidated. After button wake → chip re-advertises → phone reconnects → the new connection has NO DATA monitor.
+
+The recovery flow always sets up a fresh monitor before STOP_LOG, which is why "recover session" worked. The stop flow didn't.
+
+**Fix shipped** in [Cresento/src/src/contexts/BleContext.tsx](Cresento/src/src/contexts/BleContext.tsx) — added the same fresh-DATA-monitor setup right before `STOP_LOG` is sent in `stopLoggingAndGetCsv`. Idempotent for the legacy non-DSL case (S3, Nordic): re-establishing a still-valid monitor is harmless. Required for BUTTON_END_DSL.
+
+### Why the chip-side auto-subscribe alone wasn't sufficient
+
+Earlier ([#22 → late edit](#2026-04-25-follow-up-22)) I added `postButtonWake` chip-side logic that force-set the CCCD descriptor values to `0x0001` on connect. The reveal log showed it actually firing:
+
+```
+[BLE] post-button-wake: auto-subscribing CTRL+DATA CCCDs
+[BLE] CTRL CCCD value forced to 0x0001
+[BLE] DATA CCCD value forced to 0x0001
+```
+
+But the user STILL got no data. Why: the chip-side CCCD value controls whether the chip pumps notifies; the iOS-side delivery to the app depends on the app having registered a notify handler (which is what `monitorCharacteristicForService` does). The chip's auto-subscribe didn't help because **the app side had no listener**. Notifies arrived at iOS, iOS had nothing to deliver them to.
+
+The chip auto-subscribe is now redundant once the app fix is in (the app explicitly subscribes again). Leaving it in for defense-in-depth — it's a no-op when the app subscribes properly, and a fallback if any other client ever fails to subscribe.
+
+---
+
 ## 2026-04-25 follow-up #22 — Cycle-stretch options (Knob A shipped, Knob B deferred)
 
 User observed the chip cycling fast between 4 mA (deep sleep) and 40 mA (drain wake) and asked how to spend more time at 4 mA.
